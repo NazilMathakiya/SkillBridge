@@ -1,180 +1,839 @@
-import { Image } from 'expo-image';
-import { SymbolView } from 'expo-symbols';
-import { Platform, Pressable, ScrollView, StyleSheet } from 'react-native';
-import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
-import { ExternalLink } from '@/components/external-link';
-import { ThemedText } from '@/components/themed-text';
-import { ThemedView } from '@/components/themed-view';
-import { Collapsible } from '@/components/ui/collapsible';
-import { WebBadge } from '@/components/web-badge';
-import { BottomTabInset, MaxContentWidth, Spacing } from '@/constants/theme';
-import { useTheme } from '@/hooks/use-theme';
+import { useCallback, useState } from 'react';
+import SkillBridgeNav from '../components/SkillBridgeNav';
+import {
+  ActivityIndicator,
+  Alert,
+  Pressable,
+  RefreshControl,
+  ScrollView,
+  StatusBar,
+  StyleSheet,
+  Text,
+  View,
+} from 'react-native';
+import { router, useFocusEffect } from 'expo-router';
+import * as SecureStore from 'expo-secure-store';
 
-export default function TabTwoScreen() {
-  const safeAreaInsets = useSafeAreaInsets();
-  const insets = {
-    ...safeAreaInsets,
-    bottom: safeAreaInsets.bottom + BottomTabInset + Spacing.three,
+import { apiRequest } from '@/lib/api';
+
+const COLORS = {
+  background: '#F7F8F5',
+  white: '#FFFFFF',
+  navy: '#172B4D',
+  navyLight: '#243B5E',
+  sage: '#789783',
+  sageLight: '#E9F0EA',
+  text: '#1E293B',
+  muted: '#7B8493',
+  border: '#E3E7E2',
+  danger: '#B42318',
+};
+
+type MatchUser = {
+  id: string;
+  name: string;
+  email: string;
+  bio?: string;
+  skillsToTeach: string[];
+  skillsToLearn: string[];
+};
+
+type SkillMatch = {
+  user: MatchUser;
+  matchingSkills: {
+    youCanTeach: string[];
+    theyCanTeach: string[];
   };
-  const theme = useTheme();
+};
 
-  const contentPlatformStyle = Platform.select({
-    android: {
-      paddingTop: insets.top,
-      paddingLeft: insets.left,
-      paddingRight: insets.right,
-      paddingBottom: insets.bottom,
-    },
-    web: {
-      paddingTop: Spacing.six,
-      paddingBottom: Spacing.four,
-    },
-  });
+type MatchesResponse = {
+  success: boolean;
+  count: number;
+  matches: SkillMatch[];
+};
+
+type ProfileResponse = {
+  success: boolean;
+  user: {
+    name: string;
+    skillsToTeach: string[];
+    skillsToLearn: string[];
+  };
+};
+
+type SentRequest = {
+  _id: string;
+  receiver: string | { _id: string };
+  offeredSkill: string;
+  wantedSkill: string;
+  status: 'pending' | 'accepted' | 'rejected';
+};
+
+type SentRequestsResponse = {
+  success: boolean;
+  requests: SentRequest[];
+};
+
+export default function ExploreScreen() {
+  const [matches, setMatches] = useState<SkillMatch[]>([]);
+  const [sentRequests, setSentRequests] = useState<SentRequest[]>([]);
+  const [myName, setMyName] = useState('');
+  const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+  const [requestingId, setRequestingId] = useState<string | null>(null);
+  const [error, setError] = useState('');
+
+  const loadExplore = useCallback(async () => {
+    try {
+      setError('');
+
+      const token = await SecureStore.getItemAsync('skillbridge_token');
+
+      if (!token) {
+        router.replace('/');
+        return;
+      }
+
+      const [profileResponse, matchesResponse, requestsResponse] =
+        await Promise.all([
+          apiRequest<ProfileResponse>('/profile/me', { token }),
+          apiRequest<MatchesResponse>('/users/matches', { token }),
+          apiRequest<SentRequestsResponse>(
+            '/exchange-requests/sent',
+            { token },
+          ),
+        ]);
+
+      setMyName(profileResponse.user.name);
+      setMatches(matchesResponse.matches ?? []);
+      setSentRequests(requestsResponse.requests ?? []);
+    } catch (err) {
+      setError(
+        err instanceof Error
+          ? err.message
+          : 'Unable to load SkillBridge.',
+      );
+    } finally {
+      setLoading(false);
+      setRefreshing(false);
+    }
+  }, []);
+
+  useFocusEffect(
+    useCallback(() => {
+      loadExplore();
+    }, [loadExplore]),
+  );
+
+  async function handleRefresh() {
+    setRefreshing(true);
+    await loadExplore();
+  }
+
+  function getReceiverId(user: MatchUser) {
+    return user.id;
+  }
+
+  function hasPendingRequest(match: SkillMatch) {
+    const receiverId = getReceiverId(match.user);
+
+    return sentRequests.some((request) => {
+      const requestReceiver =
+        typeof request.receiver === 'string'
+          ? request.receiver
+          : request.receiver._id;
+
+      return (
+        requestReceiver === receiverId &&
+        request.status === 'pending'
+      );
+    });
+  }
+
+  async function handleSendRequest(match: SkillMatch) {
+    const user = match.user;
+    const receiverId = getReceiverId(user);
+
+    const offeredSkill = match.matchingSkills.youCanTeach[0];
+    const wantedSkill = match.matchingSkills.theyCanTeach[0];
+
+    if (!offeredSkill || !wantedSkill) {
+      Alert.alert(
+        'No matching skills',
+        'This user does not have a valid reciprocal skill exchange.',
+      );
+      return;
+    }
+
+    setRequestingId(receiverId);
+
+    try {
+      const token = await SecureStore.getItemAsync('skillbridge_token');
+
+      if (!token) {
+        router.replace('/');
+        return;
+      }
+
+      await apiRequest('/exchange-requests', {
+        method: 'POST',
+        token,
+        body: {
+          receiverId,
+          offeredSkill,
+          wantedSkill,
+        },
+      });
+
+      Alert.alert(
+        'Request sent!',
+        `You offered to teach ${offeredSkill} and learn ${wantedSkill}.`,
+      );
+
+      await loadExplore();
+    } catch (err) {
+      Alert.alert(
+        'Request failed',
+        err instanceof Error
+          ? err.message
+          : 'Could not send the exchange request.',
+      );
+    } finally {
+      setRequestingId(null);
+    }
+  }
+
+  function openProfile() {
+    router.push('/profile' as any);
+  }
+
+  function handleLogout() {
+    Alert.alert(
+      'Confirm logout',
+      'Are you sure you want to logout?',
+      [
+        {
+          text: 'Cancel',
+          style: 'cancel',
+        },
+        {
+          text: 'Logout',
+          style: 'destructive',
+          onPress: async () => {
+            try {
+              await SecureStore.deleteItemAsync('skillbridge_token');
+              router.replace('/');
+            } catch {
+              Alert.alert(
+                'Logout failed',
+                'Could not log you out. Please try again.',
+              );
+            }
+          },
+        },
+      ],
+    );
+  }
+
+  if (loading) {
+    return (
+      <View style={styles.loadingScreen}>
+        <StatusBar barStyle="dark-content" />
+        <ActivityIndicator size="large" color={COLORS.sage} />
+        <Text style={styles.loadingText}>
+          Finding your skill matches...
+        </Text>
+      </View>
+    );
+  }
 
   return (
-    <ScrollView
-      style={[styles.scrollView, { backgroundColor: theme.background }]}
-      contentInset={insets}
-      contentContainerStyle={[styles.contentContainer, contentPlatformStyle]}>
-      <ThemedView style={styles.container}>
-        <ThemedView style={styles.titleContainer}>
-          <ThemedText type="subtitle">Explore</ThemedText>
-          <ThemedText style={styles.centerText} themeColor="textSecondary">
-            This starter app includes example{'\n'}code to help you get started.
-          </ThemedText>
+    <View style={styles.screen}>
+      <StatusBar barStyle="dark-content" />
 
-          <ExternalLink href="https://docs.expo.dev" asChild>
-            <Pressable style={({ pressed }) => pressed && styles.pressed}>
-              <ThemedView type="backgroundElement" style={styles.linkButton}>
-                <ThemedText type="link">Expo documentation</ThemedText>
-                <SymbolView
-                  tintColor={theme.text}
-                  name={{ ios: 'arrow.up.right.square', android: 'link', web: 'link' }}
-                  size={12}
-                />
-              </ThemedView>
+      <ScrollView
+        contentContainerStyle={styles.scrollContent}
+        showsVerticalScrollIndicator={false}
+        refreshControl={
+          <RefreshControl
+            refreshing={refreshing}
+            onRefresh={handleRefresh}
+            tintColor={COLORS.sage}
+          />
+        }
+      >
+        <View style={styles.header}>
+          <View>
+            <Text style={styles.eyebrow}>SKILLBRIDGE</Text>
+            <Text style={styles.heading}>Explore</Text>
+            <Text style={styles.greeting}>
+              {myName
+                ? `Hello, ${myName}`
+                : 'Find your next skill exchange'}
+            </Text>
+          </View>
+
+          <View style={styles.headerActions}>
+            <Pressable
+              onPress={openProfile}
+              style={({ pressed }) => [
+                styles.profileButton,
+                pressed && styles.pressed,
+              ]}
+            >
+              <Text style={styles.profileButtonText}>Profile</Text>
             </Pressable>
-          </ExternalLink>
-        </ThemedView>
 
-        <ThemedView style={styles.sectionsWrapper}>
-          <Collapsible title="File-based routing">
-            <ThemedText type="small">
-              This app has two screens: <ThemedText type="code">src/app/index.tsx</ThemedText> and{' '}
-              <ThemedText type="code">src/app/explore.tsx</ThemedText>
-            </ThemedText>
-            <ThemedText type="small">
-              The layout file in <ThemedText type="code">src/app/_layout.tsx</ThemedText> sets up
-              the tab navigator.
-            </ThemedText>
-            <ExternalLink href="https://docs.expo.dev/router/introduction">
-              <ThemedText type="linkPrimary">Learn more</ThemedText>
-            </ExternalLink>
-          </Collapsible>
+            <Pressable
+              onPress={handleLogout}
+              style={({ pressed }) => [
+                styles.logoutButton,
+                pressed && styles.pressed,
+              ]}
+              accessibilityRole="button"
+              accessibilityLabel="Logout"
+            >
+              <Text style={styles.logoutButtonText}>Logout</Text>
+            </Pressable>
+          </View>
+        </View>
 
-          <Collapsible title="Android, iOS, and web support">
-            <ThemedView type="backgroundElement" style={styles.collapsibleContent}>
-              <ThemedText type="small">
-                You can open this project on Android, iOS, and the web. To open the web version,
-                press <ThemedText type="smallBold">w</ThemedText> in the terminal running this
-                project.
-              </ThemedText>
-              <Image
-                source={require('@/assets/images/tutorial-web.png')}
-                style={styles.imageTutorial}
-              />
-            </ThemedView>
-          </Collapsible>
+        <View style={styles.introCard}>
+          <View style={styles.introIcon}>
+            <Text style={styles.introIconText}>↔</Text>
+          </View>
 
-          <Collapsible title="Images">
-            <ThemedText type="small">
-              For static images, you can use the <ThemedText type="code">@2x</ThemedText> and{' '}
-              <ThemedText type="code">@3x</ThemedText> suffixes to provide files for different
-              screen densities.
-            </ThemedText>
-            <Image source={require('@/assets/images/react-logo.png')} style={styles.imageReact} />
-            <ExternalLink href="https://reactnative.dev/docs/images">
-              <ThemedText type="linkPrimary">Learn more</ThemedText>
-            </ExternalLink>
-          </Collapsible>
+          <View style={styles.introContent}>
+            <Text style={styles.introTitle}>
+              Learn by exchanging
+            </Text>
+            <Text style={styles.introDescription}>
+              Teach what you know. Learn what someone else knows.
+            </Text>
+          </View>
+        </View>
 
-          <Collapsible title="Light and dark mode components">
-            <ThemedText type="small">
-              This template has light and dark mode support. The{' '}
-              <ThemedText type="code">useColorScheme()</ThemedText> hook lets you inspect what the
-              user&apos;s current color scheme is, and so you can adjust UI colors accordingly.
-            </ThemedText>
-            <ExternalLink href="https://docs.expo.dev/develop/user-interface/color-themes/">
-              <ThemedText type="linkPrimary">Learn more</ThemedText>
-            </ExternalLink>
-          </Collapsible>
+        <View style={styles.sectionHeader}>
+          <View>
+            <Text style={styles.sectionTitle}>
+              Your skill matches
+            </Text>
+            <Text style={styles.sectionSubtitle}>
+              People who can teach you and learn from you
+            </Text>
+          </View>
 
-          <Collapsible title="Animations">
-            <ThemedText type="small">
-              This template includes an example of an animated component. The{' '}
-              <ThemedText type="code">src/components/ui/collapsible.tsx</ThemedText> component uses
-              the powerful <ThemedText type="code">react-native-reanimated</ThemedText> library to
-              animate opening this hint.
-            </ThemedText>
-          </Collapsible>
-        </ThemedView>
-        {Platform.OS === 'web' && <WebBadge />}
-      </ThemedView>
-    </ScrollView>
+          <View style={styles.countBadge}>
+            <Text style={styles.countText}>{matches.length}</Text>
+          </View>
+        </View>
+
+        {error ? (
+          <View style={styles.messageCard}>
+            <Text style={styles.messageTitle}>
+              Could not load matches
+            </Text>
+            <Text style={styles.messageText}>{error}</Text>
+
+            <Pressable
+              onPress={loadExplore}
+              style={styles.retryButton}
+            >
+              <Text style={styles.retryButtonText}>
+                Try again
+              </Text>
+            </Pressable>
+          </View>
+        ) : matches.length === 0 ? (
+          <View style={styles.emptyCard}>
+            <Text style={styles.emptyIcon}>✦</Text>
+            <Text style={styles.emptyTitle}>
+              No matches yet
+            </Text>
+            <Text style={styles.emptyDescription}>
+              Add skills you want to teach and skills you want to learn.
+              We will find people with a reciprocal exchange.
+            </Text>
+
+            <Pressable
+              onPress={openProfile}
+              style={({ pressed }) => [
+                styles.primaryButton,
+                pressed && styles.pressed,
+              ]}
+            >
+              <Text style={styles.primaryButtonText}>
+                Complete your profile
+              </Text>
+            </Pressable>
+          </View>
+        ) : (
+          <View style={styles.matchesList}>
+            {matches.map((match) => {
+              const user = match.user;
+              const pending = hasPendingRequest(match);
+              const isRequesting = requestingId === user.id;
+
+              return (
+                <View key={user.id} style={styles.matchCard}>
+                  <View style={styles.userHeader}>
+                    <View style={styles.avatar}>
+                      <Text style={styles.avatarText}>
+                        {user.name?.charAt(0).toUpperCase() || 'U'}
+                      </Text>
+                    </View>
+
+                    <View style={styles.userInfo}>
+                      <Text style={styles.userName}>
+                        {user.name}
+                      </Text>
+                      <Text style={styles.userEmail}>
+                        {user.email}
+                      </Text>
+                    </View>
+                  </View>
+
+                  {!!user.bio && (
+                    <Text style={styles.userBio} numberOfLines={3}>
+                      {user.bio}
+                    </Text>
+                  )}
+
+                  <View style={styles.exchangeBox}>
+                    <View style={styles.exchangeSection}>
+                      <Text style={styles.exchangeLabel}>
+                        THEY CAN TEACH YOU
+                      </Text>
+
+                      <View style={styles.skillsRow}>
+                        {match.matchingSkills.theyCanTeach.map(
+                          (skill) => (
+                            <View
+                              key={skill}
+                              style={styles.learnSkill}
+                            >
+                              <Text style={styles.learnSkillText}>
+                                {skill}
+                              </Text>
+                            </View>
+                          ),
+                        )}
+                      </View>
+                    </View>
+
+                    <View style={styles.exchangeDivider}>
+                      <Text style={styles.exchangeArrow}>↕</Text>
+                    </View>
+
+                    <View style={styles.exchangeSection}>
+                      <Text style={styles.exchangeLabel}>
+                        YOU CAN TEACH THEM
+                      </Text>
+
+                      <View style={styles.skillsRow}>
+                        {match.matchingSkills.youCanTeach.map(
+                          (skill) => (
+                            <View
+                              key={skill}
+                              style={styles.teachSkill}
+                            >
+                              <Text style={styles.teachSkillText}>
+                                {skill}
+                              </Text>
+                            </View>
+                          ),
+                        )}
+                      </View>
+                    </View>
+                  </View>
+
+                  <Pressable
+                    onPress={() => handleSendRequest(match)}
+                    disabled={pending || isRequesting}
+                    style={({ pressed }) => [
+                      styles.requestButton,
+                      pending && styles.requestButtonPending,
+                      pressed &&
+                        !pending &&
+                        !isRequesting &&
+                        styles.pressed,
+                    ]}
+                  >
+                    {isRequesting ? (
+                      <ActivityIndicator color={COLORS.white} />
+                    ) : (
+                      <Text
+                        style={[
+                          styles.requestButtonText,
+                          pending &&
+                            styles.requestButtonPendingText,
+                        ]}
+                      >
+                        {pending
+                          ? 'Request pending'
+                          : 'Send exchange request'}
+                      </Text>
+                    )}
+                  </Pressable>
+                </View>
+              );
+            })}
+          </View>
+        )}
+
+        <View style={styles.bottomNote}>
+          <Text style={styles.bottomNoteText}>
+            Keep learning. Keep sharing.
+          </Text>
+        </View>
+      </ScrollView>
+
+      {/* Bottom navigation bar */}
+      <SkillBridgeNav />
+    </View>
   );
 }
 
 const styles = StyleSheet.create({
-  scrollView: {
+  screen: {
+    flex: 1,
+    backgroundColor: COLORS.background,
+  },
+  loadingScreen: {
+    flex: 1,
+    backgroundColor: COLORS.background,
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 14,
+  },
+  loadingText: {
+    color: COLORS.muted,
+    fontSize: 14,
+  },
+  scrollContent: {
+    paddingHorizontal: 22,
+    paddingTop: 18,
+    paddingBottom: 36,
+  },
+  header: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 24,
+  },
+  eyebrow: {
+    color: COLORS.sage,
+    fontSize: 10,
+    fontWeight: '800',
+    letterSpacing: 1.8,
+    marginBottom: 7,
+  },
+  heading: {
+    color: COLORS.navy,
+    fontSize: 32,
+    fontWeight: '800',
+    letterSpacing: -1,
+  },
+  greeting: {
+    color: COLORS.muted,
+    fontSize: 13,
+    marginTop: 5,
+  },
+  profileButton: {
+    backgroundColor: COLORS.white,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    paddingHorizontal: 16,
+    paddingVertical: 11,
+    borderRadius: 12,
+  },
+  headerActions: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  profileButtonText: {
+    color: COLORS.navy,
+    fontSize: 13,
+    fontWeight: '700',
+  },
+  logoutButton: {
+    backgroundColor: COLORS.white,
+    borderWidth: 1,
+    borderColor: '#F0D8D5',
+    paddingHorizontal: 13,
+    paddingVertical: 11,
+    borderRadius: 12,
+  },
+  logoutButtonText: {
+    color: COLORS.danger,
+    fontSize: 13,
+    fontWeight: '700',
+  },
+  introCard: {
+    backgroundColor: COLORS.navy,
+    borderRadius: 20,
+    padding: 18,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 14,
+    marginBottom: 28,
+  },
+  introIcon: {
+    width: 46,
+    height: 46,
+    borderRadius: 15,
+    backgroundColor: '#344B6A',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  introIconText: {
+    color: COLORS.white,
+    fontSize: 27,
+    fontWeight: '700',
+  },
+  introContent: {
     flex: 1,
   },
-  contentContainer: {
+  introTitle: {
+    color: COLORS.white,
+    fontSize: 16,
+    fontWeight: '700',
+  },
+  introDescription: {
+    color: '#D3DCE7',
+    fontSize: 12,
+    lineHeight: 18,
+    marginTop: 5,
+  },
+  sectionHeader: {
     flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 16,
+  },
+  sectionTitle: {
+    color: COLORS.navy,
+    fontSize: 20,
+    fontWeight: '800',
+    letterSpacing: -0.4,
+  },
+  sectionSubtitle: {
+    color: COLORS.muted,
+    fontSize: 12,
+    marginTop: 5,
+  },
+  countBadge: {
+    minWidth: 32,
+    height: 32,
+    borderRadius: 10,
+    backgroundColor: COLORS.sageLight,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 8,
+  },
+  countText: {
+    color: COLORS.sage,
+    fontSize: 13,
+    fontWeight: '800',
+  },
+  matchesList: {
+    gap: 16,
+  },
+  matchCard: {
+    backgroundColor: COLORS.white,
+    borderRadius: 20,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    padding: 18,
+  },
+  userHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+  },
+  avatar: {
+    width: 48,
+    height: 48,
+    borderRadius: 16,
+    backgroundColor: COLORS.sageLight,
+    alignItems: 'center',
     justifyContent: 'center',
   },
-  container: {
-    maxWidth: MaxContentWidth,
-    flexGrow: 1,
+  avatarText: {
+    color: COLORS.sage,
+    fontSize: 20,
+    fontWeight: '800',
   },
-  titleContainer: {
-    gap: Spacing.three,
+  userInfo: {
+    flex: 1,
+  },
+  userName: {
+    color: COLORS.navy,
+    fontSize: 16,
+    fontWeight: '800',
+  },
+  userEmail: {
+    color: COLORS.muted,
+    fontSize: 11,
+    marginTop: 4,
+  },
+  userBio: {
+    color: COLORS.text,
+    fontSize: 13,
+    lineHeight: 19,
+    marginTop: 14,
+  },
+  exchangeBox: {
+    backgroundColor: '#FBFCFA',
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    padding: 14,
+    marginTop: 16,
+  },
+  exchangeSection: {
+    gap: 9,
+  },
+  exchangeLabel: {
+    color: COLORS.muted,
+    fontSize: 9,
+    fontWeight: '800',
+    letterSpacing: 1,
+  },
+  skillsRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 7,
+  },
+  learnSkill: {
+    backgroundColor: COLORS.sageLight,
+    borderRadius: 8,
+    paddingHorizontal: 10,
+    paddingVertical: 7,
+  },
+  learnSkillText: {
+    color: COLORS.sage,
+    fontSize: 12,
+    fontWeight: '700',
+  },
+  teachSkill: {
+    backgroundColor: '#EAF0F7',
+    borderRadius: 8,
+    paddingHorizontal: 10,
+    paddingVertical: 7,
+  },
+  teachSkillText: {
+    color: COLORS.navyLight,
+    fontSize: 12,
+    fontWeight: '700',
+  },
+  exchangeDivider: {
     alignItems: 'center',
-    paddingHorizontal: Spacing.four,
-    paddingVertical: Spacing.six,
+    marginVertical: 10,
   },
-  centerText: {
+  exchangeArrow: {
+    color: COLORS.sage,
+    fontSize: 18,
+    fontWeight: '700',
+  },
+  requestButton: {
+    height: 48,
+    backgroundColor: COLORS.navy,
+    borderRadius: 12,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginTop: 16,
+  },
+  requestButtonPending: {
+    backgroundColor: COLORS.sageLight,
+  },
+  requestButtonText: {
+    color: COLORS.white,
+    fontSize: 13,
+    fontWeight: '700',
+  },
+  requestButtonPendingText: {
+    color: COLORS.sage,
+  },
+  emptyCard: {
+    backgroundColor: COLORS.white,
+    borderRadius: 20,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    alignItems: 'center',
+    padding: 26,
+  },
+  emptyIcon: {
+    color: COLORS.sage,
+    fontSize: 32,
+    marginBottom: 10,
+  },
+  emptyTitle: {
+    color: COLORS.navy,
+    fontSize: 18,
+    fontWeight: '800',
+  },
+  emptyDescription: {
+    color: COLORS.muted,
+    fontSize: 13,
+    lineHeight: 20,
     textAlign: 'center',
+    marginTop: 9,
+  },
+  primaryButton: {
+    backgroundColor: COLORS.navy,
+    borderRadius: 12,
+    paddingHorizontal: 20,
+    paddingVertical: 13,
+    marginTop: 20,
+  },
+  primaryButtonText: {
+    color: COLORS.white,
+    fontSize: 13,
+    fontWeight: '700',
+  },
+  messageCard: {
+    backgroundColor: COLORS.white,
+    borderRadius: 18,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    padding: 20,
+  },
+  messageTitle: {
+    color: COLORS.navy,
+    fontSize: 16,
+    fontWeight: '800',
+  },
+  messageText: {
+    color: COLORS.muted,
+    fontSize: 13,
+    lineHeight: 19,
+    marginTop: 8,
+  },
+  retryButton: {
+    alignSelf: 'flex-start',
+    backgroundColor: COLORS.navy,
+    borderRadius: 10,
+    paddingHorizontal: 16,
+    paddingVertical: 10,
+    marginTop: 14,
+  },
+  retryButtonText: {
+    color: COLORS.white,
+    fontSize: 12,
+    fontWeight: '700',
+  },
+  bottomNote: {
+    alignItems: 'center',
+    marginTop: 28,
+  },
+  bottomNoteText: {
+    color: COLORS.muted,
+    fontSize: 11,
   },
   pressed: {
-    opacity: 0.7,
-  },
-  linkButton: {
-    flexDirection: 'row',
-    paddingHorizontal: Spacing.four,
-    paddingVertical: Spacing.two,
-    borderRadius: Spacing.five,
-    justifyContent: 'center',
-    gap: Spacing.one,
-    alignItems: 'center',
-  },
-  sectionsWrapper: {
-    gap: Spacing.five,
-    paddingHorizontal: Spacing.four,
-    paddingTop: Spacing.three,
-  },
-  collapsibleContent: {
-    alignItems: 'center',
-  },
-  imageTutorial: {
-    width: '100%',
-    aspectRatio: 296 / 171,
-    borderRadius: Spacing.three,
-    marginTop: Spacing.two,
-  },
-  imageReact: {
-    width: 100,
-    height: 100,
-    alignSelf: 'center',
+    opacity: 0.75,
   },
 });

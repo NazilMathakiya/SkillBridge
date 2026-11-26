@@ -36,6 +36,7 @@ export default function AuthScreen() {
   const [name, setName] = useState('');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
+  const [showPassword, setShowPassword] = useState(false);
   const [loading, setLoading] = useState(false);
 
   async function handleSubmit() {
@@ -177,17 +178,31 @@ export default function AuthScreen() {
 
             <View style={styles.inputGroup}>
               <Text style={styles.label}>PASSWORD</Text>
-              <TextInput
-                value={password}
-                onChangeText={setPassword}
-                placeholder="At least 6 characters"
-                placeholderTextColor={COLORS.muted}
-                secureTextEntry
-                autoComplete={isRegister ? 'new-password' : 'current-password'}
-                style={styles.input}
-                returnKeyType="done"
-                onSubmitEditing={handleSubmit}
-              />
+
+              <View style={styles.passwordInputContainer}>
+                <TextInput
+                  value={password}
+                  onChangeText={setPassword}
+                  placeholder="At least 6 characters"
+                  placeholderTextColor={COLORS.muted}
+                  secureTextEntry={!showPassword}
+                  autoComplete={isRegister ? 'new-password' : 'current-password'}
+                  style={styles.passwordInput}
+                  returnKeyType="done"
+                  onSubmitEditing={handleSubmit}
+                />
+
+                <Pressable
+                  onPress={() => setShowPassword((current) => !current)}
+                  style={styles.passwordToggle}
+                  accessibilityRole="button"
+                  accessibilityLabel={showPassword ? 'Hide password' : 'Show password'}
+                >
+                  <Text style={styles.passwordToggleText}>
+                    {showPassword ? 'Hide' : 'Show'}
+                  </Text>
+                </Pressable>
+              </View>
             </View>
 
             <Pressable
@@ -217,10 +232,12 @@ export default function AuthScreen() {
                   ? 'Already have an account?'
                   : "Don't have an account?"}
               </Text>
+
               <Pressable
                 onPress={() => {
                   setIsRegister(!isRegister);
                   setPassword('');
+                  setShowPassword(false);
                 }}
                 hitSlop={8}
               >
@@ -338,7 +355,7 @@ const styles = StyleSheet.create({
   formTitle: {
     color: COLORS.navy,
     fontSize: 22,
-    fontWeight: '750',
+    fontWeight: '700',
     letterSpacing: -0.6,
   },
   formSubtitle: {
@@ -366,6 +383,31 @@ const styles = StyleSheet.create({
     paddingHorizontal: 15,
     color: COLORS.text,
     fontSize: 14,
+  },
+  passwordInputContainer: {
+    height: 52,
+    backgroundColor: '#FBFCFA',
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    borderRadius: 12,
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  passwordInput: {
+    flex: 1,
+    height: 50,
+    paddingHorizontal: 15,
+    color: COLORS.text,
+    fontSize: 14,
+  },
+  passwordToggle: {
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+  },
+  passwordToggleText: {
+    color: COLORS.sage,
+    fontSize: 12,
+    fontWeight: '700',
   },
   submitButton: {
     height: 54,
