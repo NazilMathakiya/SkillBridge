@@ -1,6 +1,6 @@
-
 import React, { useCallback, useState } from "react";
 import SkillBridgeNav from "../components/SkillBridgeNav";
+import DateTimePicker from "@react-native-community/datetimepicker";
 import {
   ActivityIndicator,
   Alert,
@@ -9,6 +9,7 @@ import {
   ScrollView,
   StyleSheet,
   Text,
+  TextInput,
   View,
 } from "react-native";
 import { router, useFocusEffect } from "expo-router";
@@ -31,28 +32,76 @@ type ExchangeRequest = {
   createdAt?: string;
 };
 
+type Session = {
+  _id: string;
+  exchangeRequest: string;
+  sender: UserInfo | string;
+  receiver: UserInfo | string;
+  proposedBy: UserInfo | string;
+  scheduledAt: string;
+  durationMinutes: number;
+  mode: "online" | "in_person";
+  meetingDetails: string;
+  status:
+    | "proposed"
+    | "confirmed"
+    | "reschedule_requested"
+    | "cancelled";
+};
+
 type RequestsResponse = {
   success: boolean;
   count: number;
   requests: ExchangeRequest[];
 };
 
-type RespondResponse = {
+type SessionsResponse = {
   success: boolean;
-  message?: string;
+  count: number;
+  sessions: Session[];
 };
 
 type Tab = "received" | "sent";
 
+const getUserName = (user?: UserInfo | string) => {
+  if (!user) return "Unknown user";
+  if (typeof user === "string") return "SkillBridge user";
+  return user.name || "SkillBridge user";
+};
+
+const getUserId = (user?: UserInfo | string) => {
+  if (!user) return "";
+  if (typeof user === "string") return user;
+  return user._id;
+};
+
 export default function RequestsScreen() {
   const [activeTab, setActiveTab] = useState<Tab>("received");
+
   const [receivedRequests, setReceivedRequests] = useState<
     ExchangeRequest[]
   >([]);
   const [sentRequests, setSentRequests] = useState<ExchangeRequest[]>([]);
+  const [sessions, setSessions] = useState<Session[]>([]);
+  const [currentUserId, setCurrentUserId] = useState("");
+
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [actionId, setActionId] = useState<string | null>(null);
+
+  const [selectedRequestId, setSelectedRequestId] = useState<string | null>(
+    null
+  );
+  const [selectedSessionId, setSelectedSessionId] = useState<string | null>(
+    null
+  );
+
+  const [selectedDateTime, setSelectedDateTime] = useState(new Date());
+  const [showDatePicker, setShowDatePicker] = useState(false);
+  const [showTimePicker, setShowTimePicker] = useState(false);
+  const [durationMinutes, setDurationMinutes] = useState("60");
+  const [mode, setMode] = useState<"online" | "in_person">("online");
+  const [meetingDetails, setMeetingDetails] = useState("");
 
   const loadRequests = useCallback(async (isRefresh = false) => {
     try {
@@ -69,19 +118,24 @@ export default function RequestsScreen() {
         return;
       }
 
-      const [received, sent] = await Promise.all([
-        apiRequest<RequestsResponse>(
-          "/exchange-requests/received",
-          { token }
-        ),
-        apiRequest<RequestsResponse>(
-          "/exchange-requests/sent",
-          { token }
-        ),
-      ]);
+      const [received, sent, sessionResponse, profile] =
+        await Promise.all([
+          apiRequest<RequestsResponse>(
+            "/exchange-requests/received",
+            { token }
+          ),
+          apiRequest<RequestsResponse>(
+            "/exchange-requests/sent",
+            { token }
+          ),
+          apiRequest<SessionsResponse>("/sessions", { token }),
+          apiRequest<{ user: UserInfo }>("/profile/me", { token }),
+        ]);
 
       setReceivedRequests(received.requests ?? []);
       setSentRequests(sent.requests ?? []);
+      setSessions(sessionResponse.sessions ?? []);
+      setCurrentUserId(profile.user._id);
     } catch (error) {
       Alert.alert(
         "Could not load requests",
@@ -99,6 +153,12 @@ export default function RequestsScreen() {
     }, [loadRequests])
   );
 
+  const getSessionForRequest = (requestId: string) => {
+    return sessions.find(
+      (session) => getUserId(session.exchangeRequest) === requestId
+    );
+  };
+
   const respondToRequest = async (
     requestId: string,
     status: "accepted" | "rejected"
@@ -113,7 +173,7 @@ export default function RequestsScreen() {
         return;
       }
 
-      await apiRequest<RespondResponse>(
+      await apiRequest(
         `/exchange-requests/${requestId}/respond`,
         {
           method: "PATCH",
@@ -140,10 +200,208 @@ export default function RequestsScreen() {
     }
   };
 
-  const getUserName = (user?: UserInfo | string) => {
-    if (!user) return "Unknown user";
-    if (typeof user === "string") return "SkillBridge user";
-    return user.name || "SkillBridge user";
+  const openScheduleForm = (
+    request: ExchangeRequest,
+    session?: Session
+  ) => {
+    setSelectedRequestId(request._id);
+    setSelectedSessionId(session?._id ?? null);
+
+    setSelectedDateTime(
+      session?.scheduledAt
+        ? new Date(session.scheduledAt)
+        : new Date(Date.now() + 60 * 60 * 1000)
+    );
+    setShowDatePicker(false);
+    setShowTimePicker(false);
+
+    setDurationMinutes(
+      session ? String(session.durationMinutes) : "60"
+    );
+
+    setMode(session?.mode ?? "online");
+    setMeetingDetails(session?.meetingDetails ?? "");
+  };
+
+  const closeScheduleForm = () => {
+    setSelectedRequestId(null);
+    setSelectedSessionId(null);
+    setShowDatePicker(false);
+    setShowTimePicker(false);
+  };
+
+  const saveSchedule = async () => {
+    if (!selectedRequestId) return;
+
+    const date = selectedDateTime;
+    const duration = Number(durationMinutes);
+
+    if (Number.isNaN(date.getTime())) {
+      Alert.alert(
+        "Invalid date/time",
+        "Please select a valid date and time."
+      );
+      return;
+    }
+
+    if (
+      !Number.isInteger(duration) ||
+      duration < 15 ||
+      duration > 240
+    ) {
+      Alert.alert(
+        "Invalid duration",
+        "Duration must be between 15 and 240 minutes."
+      );
+      return;
+    }
+
+    if (date.getTime() <= Date.now()) {
+      Alert.alert(
+        "Choose a future time",
+        "The session date and time must be in the future."
+      );
+      return;
+    }
+
+    try {
+      setActionId(selectedSessionId ?? selectedRequestId);
+
+      const token = await SecureStore.getItemAsync("skillbridge_token");
+
+      if (!token) {
+        router.replace("/" as any);
+        return;
+      }
+
+      const body = {
+        scheduledAt: date.toISOString(),
+        durationMinutes: duration,
+        mode,
+        meetingDetails: meetingDetails.trim(),
+      };
+
+      if (selectedSessionId) {
+        await apiRequest(
+          `/sessions/${selectedSessionId}/reschedule`,
+          {
+            method: "PATCH",
+            token,
+            body,
+          }
+        );
+
+        Alert.alert(
+          "Reschedule proposed",
+          "The other participant needs to confirm the new time."
+        );
+      } else {
+        await apiRequest(
+          "/sessions",
+          {
+            method: "POST",
+            token,
+            body: {
+              ...body,
+              exchangeRequestId: selectedRequestId,
+            },
+          }
+        );
+
+        Alert.alert(
+          "Session proposed",
+          "Your session proposal has been sent."
+        );
+      }
+
+      closeScheduleForm();
+      await loadRequests(true);
+    } catch (error) {
+      Alert.alert(
+        "Could not save session",
+        error instanceof Error ? error.message : "Please try again."
+      );
+    } finally {
+      setActionId(null);
+    }
+  };
+
+  const confirmSession = async (sessionId: string) => {
+    try {
+      setActionId(sessionId);
+
+      const token = await SecureStore.getItemAsync("skillbridge_token");
+
+      if (!token) {
+        router.replace("/" as any);
+        return;
+      }
+
+      await apiRequest(
+        `/sessions/${sessionId}/confirm`,
+        {
+          method: "PATCH",
+          token,
+        }
+      );
+
+      await loadRequests(true);
+
+      Alert.alert("Session confirmed", "Your session is confirmed.");
+    } catch (error) {
+      Alert.alert(
+        "Could not confirm",
+        error instanceof Error ? error.message : "Please try again."
+      );
+    } finally {
+      setActionId(null);
+    }
+  };
+
+  const cancelSession = (sessionId: string) => {
+    Alert.alert(
+      "Cancel session?",
+      "The scheduled session will be cancelled.",
+      [
+        { text: "Keep session", style: "cancel" },
+        {
+          text: "Cancel session",
+          style: "destructive",
+          onPress: async () => {
+            try {
+              setActionId(sessionId);
+
+              const token =
+                await SecureStore.getItemAsync("skillbridge_token");
+
+              if (!token) {
+                router.replace("/" as any);
+                return;
+              }
+
+              await apiRequest(
+                `/sessions/${sessionId}/cancel`,
+                {
+                  method: "PATCH",
+                  token,
+                }
+              );
+
+              await loadRequests(true);
+            } catch (error) {
+              Alert.alert(
+                "Could not cancel",
+                error instanceof Error
+                  ? error.message
+                  : "Please try again."
+              );
+            } finally {
+              setActionId(null);
+            }
+          },
+        },
+      ]
+    );
   };
 
   const requests =
@@ -198,7 +456,7 @@ export default function RequestsScreen() {
         </Pressable>
       </View>
 
-      {loading ? (
+        {loading ? (
         <View style={styles.center}>
           <ActivityIndicator size="large" color="#2563EB" />
           <Text style={styles.loadingText}>Loading requests...</Text>
@@ -240,6 +498,7 @@ export default function RequestsScreen() {
 
               const isPending = request.status === "pending";
               const isWorking = actionId === request._id;
+              const session = getSessionForRequest(request._id);
 
               const firstSkillLabel =
                 activeTab === "received"
@@ -341,6 +600,279 @@ export default function RequestsScreen() {
                       </Pressable>
                     </View>
                   )}
+
+                  {request.status === "accepted" && !session && (
+                    <Pressable
+                      style={styles.scheduleButton}
+                      onPress={() => openScheduleForm(request)}
+                    >
+                      <Text style={styles.scheduleButtonText}>
+                        Schedule Session
+                      </Text>
+                    </Pressable>
+                  )}
+
+                  {session && (
+                    <View style={styles.sessionBox}>
+                      <Text style={styles.sessionTitle}>
+                        Session Details
+                      </Text>
+
+                      <Text style={styles.sessionText}>
+                        Date: {new Date(session.scheduledAt).toLocaleString()}
+                      </Text>
+
+                      <Text style={styles.sessionText}>
+                        Duration: {session.durationMinutes} minutes
+                      </Text>
+
+                      <Text style={styles.sessionText}>
+                        Type: {session.mode === "online" ? "Online" : "In person"}
+                      </Text>
+
+                      <Text style={styles.sessionText}>
+                        Status: {session.status.replace("_", " ")}
+                      </Text>
+
+                      {!!session.meetingDetails && (
+                        <Text style={styles.sessionText}>
+                          Details: {session.meetingDetails}
+                        </Text>
+                      )}
+
+                      {session.status === "proposed" ||
+                      session.status === "reschedule_requested" ? (
+                        getUserId(session.proposedBy) !== currentUserId ? (
+                          <Pressable
+                            disabled={actionId === session._id}
+                            style={styles.confirmButton}
+                            onPress={() => confirmSession(session._id)}
+                          >
+                            <Text style={styles.confirmButtonText}>
+                              Confirm Session
+                            </Text>
+                          </Pressable>
+                        ) : (
+                          <Text style={styles.waitingText}>
+                            Waiting for the other participant to confirm
+                          </Text>
+                        )
+                      ) : null}
+
+                      {session.status !== "cancelled" && (
+                        <View style={styles.actions}>
+                          <Pressable
+                            style={[
+                              styles.actionButton,
+                              styles.rescheduleButton,
+                            ]}
+                            onPress={() =>
+                              openScheduleForm(request, session)
+                            }
+                          >
+                            <Text style={styles.rescheduleText}>
+                              Reschedule
+                            </Text>
+                          </Pressable>
+
+                          <Pressable
+                            style={[
+                              styles.actionButton,
+                              styles.rejectButton,
+                            ]}
+                            onPress={() => cancelSession(session._id)}
+                          >
+                            <Text style={styles.rejectText}>
+                              Cancel
+                            </Text>
+                          </Pressable>
+                        </View>
+                      )}
+                    </View>
+                  )}
+
+                  {selectedRequestId === request._id && (
+                    <View style={styles.scheduleForm}>
+                      <Text style={styles.formTitle}>
+                        {selectedSessionId
+                          ? "Propose New Schedule"
+                          : "Schedule Session"}
+                      </Text>
+
+                      <Text style={styles.inputLabel}>
+                        Date and time
+                      </Text>
+
+                      <Pressable
+                        style={styles.dateTimeButton}
+                        onPress={() => setShowDatePicker(true)}
+                      >
+                        <Text style={styles.dateTimeButtonText}>
+                          📅 {selectedDateTime.toLocaleDateString([], {
+                            year: "numeric",
+                            month: "long",
+                            day: "numeric",
+                            weekday: "short",
+                          })}
+                        </Text>
+                      </Pressable>
+
+                      <Pressable
+                        style={styles.dateTimeButton}
+                        onPress={() => setShowTimePicker(true)}
+                      >
+                        <Text style={styles.dateTimeButtonText}>
+                          🕒 {selectedDateTime.toLocaleTimeString([], {
+                            hour: "2-digit",
+                            minute: "2-digit",
+                          })}
+                        </Text>
+                      </Pressable>
+
+                      {showDatePicker && (
+                        <DateTimePicker
+                          value={selectedDateTime}
+                          mode="date"
+                          display="default"
+                          minimumDate={new Date()}
+                          onChange={(event, date) => {
+                            setShowDatePicker(false);
+                            if (date) {
+                              setSelectedDateTime((current) => {
+                                const updated = new Date(current);
+                                updated.setFullYear(
+                                  date.getFullYear(),
+                                  date.getMonth(),
+                                  date.getDate()
+                                );
+                                return updated;
+                              });
+                            }
+                          }}
+                        />
+                      )}
+
+                      {showTimePicker && (
+                        <DateTimePicker
+                          value={selectedDateTime}
+                          mode="time"
+                          display="default"
+                          onChange={(event, date) => {
+                            setShowTimePicker(false);
+                            if (date) {
+                              setSelectedDateTime((current) => {
+                                const updated = new Date(current);
+                                updated.setHours(
+                                  date.getHours(),
+                                  date.getMinutes(),
+                                  0,
+                                  0
+                                );
+                                return updated;
+                              });
+                            }
+                          }}
+                        />
+                      )}
+
+                      <Text style={styles.inputHint}>
+                        Select a date from the calendar and a time from the clock.
+                      </Text>
+
+                      <Text style={styles.inputLabel}>
+                        Duration (minutes)
+                      </Text>
+
+                      <TextInput
+                        value={durationMinutes}
+                        onChangeText={setDurationMinutes}
+                        keyboardType="number-pad"
+                        placeholder="60"
+                        style={styles.input}
+                      />
+
+                      <Text style={styles.inputLabel}>
+                        Session type
+                      </Text>
+
+                      <View style={styles.modeRow}>
+                        <Pressable
+                          style={[
+                            styles.modeButton,
+                            mode === "online" && styles.modeSelected,
+                          ]}
+                          onPress={() => setMode("online")}
+                        >
+                          <Text
+                            style={[
+                              styles.modeText,
+                              mode === "online" && styles.modeSelectedText,
+                            ]}
+                          >
+                            Online
+                          </Text>
+                        </Pressable>
+
+                        <Pressable
+                          style={[
+                            styles.modeButton,
+                            mode === "in_person" && styles.modeSelected,
+                          ]}
+                          onPress={() => setMode("in_person")}
+                        >
+                          <Text
+                            style={[
+                              styles.modeText,
+                              mode === "in_person" && styles.modeSelectedText,
+                            ]}
+                          >
+                            In person
+                          </Text>
+                        </Pressable>
+                      </View>
+
+                      <Text style={styles.inputLabel}>
+                        Meeting details (optional)
+                      </Text>
+
+                      <TextInput
+                        value={meetingDetails}
+                        onChangeText={setMeetingDetails}
+                        placeholder="Meeting link or location"
+                        multiline
+                        style={[styles.input, styles.multilineInput]}
+                      />
+
+                      <View style={styles.actions}>
+                        <Pressable
+                          style={[
+                            styles.actionButton,
+                            styles.rejectButton,
+                          ]}
+                          onPress={closeScheduleForm}
+                        >
+                          <Text style={styles.rejectText}>Close</Text>
+                        </Pressable>
+
+                        <Pressable
+                          disabled={actionId !== null}
+                          style={[
+                            styles.actionButton,
+                            styles.acceptButton,
+                          ]}
+                          onPress={saveSchedule}
+                        >
+                          {actionId !== null ? (
+                            <ActivityIndicator color="#FFFFFF" />
+                          ) : (
+                            <Text style={styles.acceptText}>
+                              Send Proposal
+                            </Text>
+                          )}
+                        </Pressable>
+                      </View>
+                    </View>
+                  )}
                 </View>
               );
             })
@@ -348,7 +880,6 @@ export default function RequestsScreen() {
         </ScrollView>
       )}
 
-      {/* Bottom navigation */}
       <SkillBridgeNav />
     </View>
   );
@@ -545,5 +1076,134 @@ const styles = StyleSheet.create({
   acceptText: {
     color: "#FFFFFF",
     fontWeight: "700",
+  },
+  scheduleButton: {
+    marginTop: 14,
+    paddingVertical: 12,
+    borderRadius: 10,
+    alignItems: "center",
+    backgroundColor: "#2563EB",
+  },
+  scheduleButtonText: {
+    color: "#FFFFFF",
+    fontWeight: "700",
+  },
+  sessionBox: {
+    marginTop: 14,
+    padding: 12,
+    borderRadius: 12,
+    backgroundColor: "#EFF6FF",
+  },
+  sessionTitle: {
+    fontSize: 15,
+    fontWeight: "700",
+    color: "#1D4ED8",
+    marginBottom: 8,
+  },
+  sessionText: {
+    fontSize: 13,
+    color: "#374151",
+    marginTop: 4,
+  },
+  confirmButton: {
+    marginTop: 12,
+    paddingVertical: 11,
+    borderRadius: 9,
+    backgroundColor: "#16A34A",
+    alignItems: "center",
+  },
+  confirmButtonText: {
+    color: "#FFFFFF",
+    fontWeight: "700",
+  },
+  waitingText: {
+    marginTop: 10,
+    fontSize: 12,
+    color: "#6B7280",
+  },
+  rescheduleButton: {
+    backgroundColor: "#DBEAFE",
+  },
+  rescheduleText: {
+    color: "#1D4ED8",
+    fontWeight: "700",
+  },
+  scheduleForm: {
+    marginTop: 16,
+    padding: 14,
+    borderRadius: 12,
+    backgroundColor: "#F9FAFB",
+    borderWidth: 1,
+    borderColor: "#E5E7EB",
+  },
+  formTitle: {
+    fontSize: 17,
+    fontWeight: "700",
+    color: "#111827",
+    marginBottom: 14,
+  },
+  inputLabel: {
+    fontSize: 13,
+    fontWeight: "600",
+    color: "#374151",
+    marginBottom: 6,
+    marginTop: 10,
+  },
+  input: {
+    backgroundColor: "#FFFFFF",
+    borderWidth: 1,
+    borderColor: "#D1D5DB",
+    borderRadius: 9,
+    paddingHorizontal: 12,
+    paddingVertical: 11,
+    fontSize: 14,
+    color: "#111827",
+  },
+  dateTimeButton: {
+    backgroundColor: "#FFFFFF",
+    borderWidth: 1,
+    borderColor: "#D1D5DB",
+    borderRadius: 9,
+    paddingHorizontal: 12,
+    paddingVertical: 14,
+    marginBottom: 9,
+  },
+  dateTimeButtonText: {
+    fontSize: 14,
+    fontWeight: "600",
+    color: "#111827",
+  },
+  inputHint: {
+    fontSize: 11,
+    color: "#6B7280",
+    marginTop: 5,
+  },
+  multilineInput: {
+    minHeight: 70,
+    textAlignVertical: "top",
+  },
+  modeRow: {
+    flexDirection: "row",
+    gap: 10,
+  },
+  modeButton: {
+    flex: 1,
+    paddingVertical: 11,
+    alignItems: "center",
+    borderRadius: 9,
+    backgroundColor: "#E5E7EB",
+  },
+  modeSelected: {
+    backgroundColor: "#DBEAFE",
+    borderWidth: 1,
+    borderColor: "#2563EB",
+  },
+  modeText: {
+    fontSize: 13,
+    fontWeight: "600",
+    color: "#4B5563",
+  },
+  modeSelectedText: {
+    color: "#1D4ED8",
   },
 });

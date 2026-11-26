@@ -62,12 +62,15 @@ type ProfileResponse = {
   };
 };
 
+type RequestStatus = 'pending' | 'accepted' | 'rejected';
+
 type SentRequest = {
   _id: string;
   receiver: string | { _id: string };
   offeredSkill: string;
   wantedSkill: string;
-  status: 'pending' | 'accepted' | 'rejected';
+  status: RequestStatus;
+  createdAt?: string;
 };
 
 type SentRequestsResponse = {
@@ -75,9 +78,31 @@ type SentRequestsResponse = {
   requests: SentRequest[];
 };
 
+type ReceivedRequest = {
+  _id: string;
+  sender: string | { _id: string };
+  offeredSkill: string;
+  wantedSkill: string;
+  status: RequestStatus;
+  createdAt?: string;
+};
+
+type ReceivedRequestsResponse = {
+  success: boolean;
+  requests: ReceivedRequest[];
+};
+
+type MatchRequestStatus = {
+  status: RequestStatus;
+  direction: 'sent' | 'received';
+  createdAt?: string;
+};
+
 export default function ExploreScreen() {
   const [matches, setMatches] = useState<SkillMatch[]>([]);
   const [sentRequests, setSentRequests] = useState<SentRequest[]>([]);
+  const [receivedRequests, setReceivedRequests] =
+    useState<ReceivedRequest[]>([]);
   const [myName, setMyName] = useState('');
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -95,19 +120,28 @@ export default function ExploreScreen() {
         return;
       }
 
-      const [profileResponse, matchesResponse, requestsResponse] =
-        await Promise.all([
-          apiRequest<ProfileResponse>('/profile/me', { token }),
-          apiRequest<MatchesResponse>('/users/matches', { token }),
-          apiRequest<SentRequestsResponse>(
-            '/exchange-requests/sent',
-            { token },
-          ),
-        ]);
+      const [
+        profileResponse,
+        matchesResponse,
+        sentRequestsResponse,
+        receivedRequestsResponse,
+      ] = await Promise.all([
+        apiRequest<ProfileResponse>('/profile/me', { token }),
+        apiRequest<MatchesResponse>('/users/matches', { token }),
+        apiRequest<SentRequestsResponse>(
+          '/exchange-requests/sent',
+          { token },
+        ),
+        apiRequest<ReceivedRequestsResponse>(
+          '/exchange-requests/received',
+          { token },
+        ),
+      ]);
 
       setMyName(profileResponse.user.name);
       setMatches(matchesResponse.matches ?? []);
-      setSentRequests(requestsResponse.requests ?? []);
+      setSentRequests(sentRequestsResponse.requests ?? []);
+      setReceivedRequests(receivedRequestsResponse.requests ?? []);
     } catch (err) {
       setError(
         err instanceof Error
@@ -135,20 +169,85 @@ export default function ExploreScreen() {
     return user.id;
   }
 
-  function hasPendingRequest(match: SkillMatch) {
-    const receiverId = getReceiverId(match.user);
+  function getRequestForMatch(
+    match: SkillMatch,
+  ): MatchRequestStatus | undefined {
+    const otherUserId = getReceiverId(match.user);
 
-    return sentRequests.some((request) => {
-      const requestReceiver =
+    // From the current user's perspective:
+    // offeredSkill = what I can teach them
+    // wantedSkill = what they can teach me
+    const offeredSkill = match.matchingSkills.youCanTeach[0];
+    const wantedSkill = match.matchingSkills.theyCanTeach[0];
+
+    if (!offeredSkill || !wantedSkill) {
+      return undefined;
+    }
+
+    const normalizeSkill = (skill: string) =>
+      skill.trim().toLowerCase();
+
+    const sentRequest = sentRequests.find((request) => {
+      const receiverId =
         typeof request.receiver === 'string'
           ? request.receiver
           : request.receiver._id;
 
       return (
-        requestReceiver === receiverId &&
-        request.status === 'pending'
+        receiverId === otherUserId &&
+        normalizeSkill(request.offeredSkill) ===
+          normalizeSkill(offeredSkill) &&
+        normalizeSkill(request.wantedSkill) ===
+          normalizeSkill(wantedSkill)
       );
     });
+
+    const receivedRequest = receivedRequests.find((request) => {
+      const senderId =
+        typeof request.sender === 'string'
+          ? request.sender
+          : request.sender._id;
+
+      // A received request is stored from the sender's perspective,
+      // so the offered and wanted skills are reversed.
+      return (
+        senderId === otherUserId &&
+        normalizeSkill(request.offeredSkill) ===
+          normalizeSkill(wantedSkill) &&
+        normalizeSkill(request.wantedSkill) ===
+          normalizeSkill(offeredSkill)
+      );
+    });
+
+    const candidates: MatchRequestStatus[] = [];
+
+    if (sentRequest) {
+      candidates.push({
+        status: sentRequest.status,
+        direction: 'sent',
+        createdAt: sentRequest.createdAt,
+      });
+    }
+
+    if (receivedRequest) {
+      candidates.push({
+        status: receivedRequest.status,
+        direction: 'received',
+        createdAt: receivedRequest.createdAt,
+      });
+    }
+
+    if (candidates.length === 0) {
+      return undefined;
+    }
+
+    // Display the newest request if older data contains requests
+    // in both directions.
+    return candidates.sort(
+      (a, b) =>
+        new Date(b.createdAt ?? 0).getTime() -
+        new Date(a.createdAt ?? 0).getTime(),
+    )[0];
   }
 
   async function handleSendRequest(match: SkillMatch) {
@@ -372,7 +471,13 @@ export default function ExploreScreen() {
           <View style={styles.matchesList}>
             {matches.map((match) => {
               const user = match.user;
-              const pending = hasPendingRequest(match);
+              const request = getRequestForMatch(match);
+              const requestStatus = request?.status;
+              const pending = requestStatus === 'pending';
+              const accepted = requestStatus === 'accepted';
+              const rejected = requestStatus === 'rejected';
+              const receivedPending =
+                pending && request?.direction === 'received';
               const isRequesting = requestingId === user.id;
 
               return (
@@ -450,12 +555,27 @@ export default function ExploreScreen() {
 
                   <Pressable
                     onPress={() => handleSendRequest(match)}
-                    disabled={pending || isRequesting}
+                    disabled={pending || accepted || isRequesting}
+                    accessibilityRole="button"
+                    accessibilityLabel={
+                      pending
+                        ? receivedPending
+                          ? 'Exchange request received'
+                          : 'Exchange request pending'
+                        : accepted
+                          ? 'Exchange request accepted'
+                          : rejected
+                            ? 'Send a new exchange request'
+                            : 'Send exchange request'
+                    }
                     style={({ pressed }) => [
                       styles.requestButton,
                       pending && styles.requestButtonPending,
+                      accepted && styles.requestButtonAccepted,
+                      rejected && styles.requestButtonRejected,
                       pressed &&
                         !pending &&
+                        !accepted &&
                         !isRequesting &&
                         styles.pressed,
                     ]}
@@ -466,16 +586,35 @@ export default function ExploreScreen() {
                       <Text
                         style={[
                           styles.requestButtonText,
-                          pending &&
-                            styles.requestButtonPendingText,
+                          pending && styles.requestButtonPendingText,
+                          accepted && styles.requestButtonAcceptedText,
+                          rejected && styles.requestButtonRejectedText,
                         ]}
                       >
                         {pending
-                          ? 'Request pending'
-                          : 'Send exchange request'}
+                          ? receivedPending
+                            ? 'Request received'
+                            : 'Request pending'
+                          : accepted
+                            ? 'Exchange accepted'
+                            : rejected
+                              ? 'Send new request'
+                              : 'Send exchange request'}
                       </Text>
                     )}
                   </Pressable>
+
+                  {receivedPending && (
+                    <Text style={styles.requestStatusHint}>
+                      Open Requests to accept or reject.
+                    </Text>
+                  )}
+
+                  {rejected && (
+                    <Text style={styles.requestStatusHint}>
+                      Previous request was declined.
+                    </Text>
+                  )}
                 </View>
               );
             })}
@@ -489,7 +628,6 @@ export default function ExploreScreen() {
         </View>
       </ScrollView>
 
-      {/* Bottom navigation bar */}
       <SkillBridgeNav />
     </View>
   );
@@ -749,6 +887,12 @@ const styles = StyleSheet.create({
   requestButtonPending: {
     backgroundColor: COLORS.sageLight,
   },
+  requestButtonAccepted: {
+    backgroundColor: '#E5F3E8',
+  },
+  requestButtonRejected: {
+    backgroundColor: '#FBE9E7',
+  },
   requestButtonText: {
     color: COLORS.white,
     fontSize: 13,
@@ -756,6 +900,18 @@ const styles = StyleSheet.create({
   },
   requestButtonPendingText: {
     color: COLORS.sage,
+  },
+  requestButtonAcceptedText: {
+    color: '#267A45',
+  },
+  requestButtonRejectedText: {
+    color: COLORS.danger,
+  },
+  requestStatusHint: {
+    color: COLORS.muted,
+    fontSize: 11,
+    textAlign: 'center',
+    marginTop: 8,
   },
   emptyCard: {
     backgroundColor: COLORS.white,
