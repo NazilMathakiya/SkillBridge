@@ -9,6 +9,8 @@ export default function RootLayout() {
       <Stack.Screen name="explore" />
       <Stack.Screen name="profile" />
       <Stack.Screen name="requests" />
+      <Stack.Screen name="chats" />
+      <Stack.Screen name="chat/[chatId]" />
     </Stack>
   );
 }

@@ -11,6 +11,7 @@ import {
 const tabs = [
   { label: "Explore", route: "/explore" },
   { label: "Requests", route: "/requests" },
+  { label: "Chats", route: "/chats" },
   { label: "Profile", route: "/profile" },
 ] as const;
 
@@ -20,7 +21,9 @@ export default function SkillBridgeNav() {
   return (
     <View style={styles.container}>
       {tabs.map((tab) => {
-        const active = pathname === tab.route;
+        const active =
+          pathname === tab.route ||
+          (tab.route === "/chats" && pathname.startsWith("/chat/"));
 
         return (
           <Pressable
@@ -52,8 +55,8 @@ const styles = StyleSheet.create({
     backgroundColor: "#FFFFFF",
     borderTopWidth: 1,
     borderTopColor: "#E5E7EB",
-    paddingVertical: 10,
-    paddingHorizontal: 12,
+    paddingVertical: 8,
+    paddingHorizontal: 6,
   },
   tab: {
     flex: 1,
@@ -65,7 +68,7 @@ const styles = StyleSheet.create({
     backgroundColor: "#EDE9FE",
   },
   label: {
-    fontSize: 14,
+    fontSize: 12,
     fontWeight: "600",
     color: "#6B7280",
   },

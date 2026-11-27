@@ -8,6 +8,7 @@ export interface IUser extends Document {
   bio: string;
   skillsToTeach: string[];
   skillsToLearn: string[];
+  expoPushTokens: string[];
 }
 
 const userSchema = new Schema<IUser>(
@@ -48,12 +49,18 @@ const userSchema = new Schema<IUser>(
       type: [String],
       default: [],
     },
+
+    expoPushTokens: {
+      type: [String],
+      default: [],
+    },
   },
   {
     timestamps: true,
   }
 );
 
-const User = mongoose.model<IUser>("User", userSchema);
+const User =
+  mongoose.models.User || mongoose.model<IUser>("User", userSchema);
 
 export default User;

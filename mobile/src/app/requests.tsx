@@ -14,7 +14,18 @@ import {
 } from "react-native";
 import { router, useFocusEffect } from "expo-router";
 import * as SecureStore from "expo-secure-store";
+import * as Notifications from "expo-notifications";
 import { apiRequest } from "@/lib/api";
+
+Notifications.setNotificationHandler({
+  handleNotification: async () => ({
+    shouldShowAlert: true,
+    shouldShowBanner: true,
+    shouldShowList: true,
+    shouldPlaySound: true,
+    shouldSetBadge: false,
+  }),
+});
 
 type UserInfo = {
   _id: string;
@@ -73,6 +84,99 @@ const getUserId = (user?: UserInfo | string) => {
   if (!user) return "";
   if (typeof user === "string") return user;
   return user._id;
+};
+
+/**
+ * Keeps one local reminder per confirmed session on this device.
+ * The reminder fires 30 minutes before the session starts.
+ * Proposed/reschedule-requested/cancelled sessions have no reminder.
+ */
+const syncSessionReminders = async (sessions: Session[]) => {
+  const scheduled = await Notifications.getAllScheduledNotificationsAsync();
+  const existing = scheduled.filter(
+    (notification) =>
+      notification.content.data?.skillBridgeSessionReminder === true
+  );
+
+  const now = Date.now();
+  const targetSessions = sessions
+    .filter((session) => session.status === "confirmed")
+    .map((session) => {
+      const sessionDate = new Date(session.scheduledAt);
+      const reminderDate = new Date(sessionDate.getTime() - 30 * 60 * 1000);
+      return { session, sessionDate, reminderDate };
+    })
+    .filter(
+      ({ sessionDate, reminderDate }) =>
+        !Number.isNaN(sessionDate.getTime()) &&
+        sessionDate.getTime() > now &&
+        reminderDate.getTime() > now
+    );
+
+  const targetById = new Map(
+    targetSessions.map(({ session, sessionDate }) => [
+      session._id,
+      sessionDate.toISOString(),
+    ])
+  );
+
+  // Cancel reminders for cancelled, changed, or no-longer-confirmed sessions.
+  for (const notification of existing) {
+    const sessionId = notification.content.data?.sessionId;
+    const storedSchedule = notification.content.data?.scheduledAt;
+    const currentSchedule =
+      typeof sessionId === "string" ? targetById.get(sessionId) : undefined;
+
+    if (!currentSchedule || currentSchedule !== storedSchedule) {
+      await Notifications.cancelScheduledNotificationAsync(
+        notification.identifier
+      );
+    }
+  }
+
+  if (targetSessions.length === 0) return;
+
+  let permission = await Notifications.getPermissionsAsync();
+  if (!permission.granted) {
+    permission = await Notifications.requestPermissionsAsync();
+  }
+  if (!permission.granted) return;
+
+  const remaining = await Notifications.getAllScheduledNotificationsAsync();
+  const existingForSessions = new Map(
+    remaining
+      .filter(
+        (notification) =>
+          notification.content.data?.skillBridgeSessionReminder === true
+      )
+      .map((notification) => [
+        String(notification.content.data?.sessionId ?? ""),
+        String(notification.content.data?.scheduledAt ?? ""),
+      ])
+  );
+
+  for (const { session, sessionDate, reminderDate } of targetSessions) {
+    if (existingForSessions.get(session._id) === sessionDate.toISOString()) {
+      continue;
+    }
+
+    await Notifications.scheduleNotificationAsync({
+      content: {
+        title: "SkillBridge session soon",
+        body: `Your session starts in 30 minutes (${sessionDate.toLocaleString()}).`,
+        sound: "default",
+        data: {
+          skillBridgeSessionReminder: true,
+          sessionId: session._id,
+          scheduledAt: sessionDate.toISOString(),
+        },
+      },
+      trigger: {
+        type: Notifications.SchedulableTriggerInputTypes.DATE,
+        date: reminderDate,
+      },
+    });
+  }
 };
 
 export default function RequestsScreen() {
@@ -134,8 +238,16 @@ export default function RequestsScreen() {
 
       setReceivedRequests(received.requests ?? []);
       setSentRequests(sent.requests ?? []);
-      setSessions(sessionResponse.sessions ?? []);
+      const loadedSessions = sessionResponse.sessions ?? [];
+      setSessions(loadedSessions);
       setCurrentUserId(profile.user._id);
+
+      // Reminder scheduling is best-effort; it must not block request loading.
+      try {
+        await syncSessionReminders(loadedSessions);
+      } catch (notificationError) {
+        console.warn("Could not sync session reminders:", notificationError);
+      }
     } catch (error) {
       Alert.alert(
         "Could not load requests",

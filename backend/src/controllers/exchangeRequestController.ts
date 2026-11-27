@@ -3,6 +3,7 @@ import { Request, Response } from "express";
 import mongoose from "mongoose";
 import User from "../models/User.js";
 import ExchangeRequest from "../models/ExchangeRequest.js";
+import { createNotification } from "../services/notificationService.js";
 
 const normalizeSkill = (skill: string): string =>
   skill.trim().toLowerCase();
@@ -25,7 +26,8 @@ export const sendExchangeRequest = async (
     ) {
       res.status(400).json({
         success: false,
-        message: "receiverId, offeredSkill, and wantedSkill are required",
+        message:
+          "receiverId, offeredSkill, and wantedSkill are required",
       });
       return;
     }
@@ -80,17 +82,30 @@ export const sendExchangeRequest = async (
     }
 
     const existingRequest = await ExchangeRequest.findOne({
-      sender: senderId,
-      receiver: receiverId,
-      offeredSkill: offered,
-      wantedSkill: wanted,
-      status: "pending",
+      status: { $in: ["pending", "accepted"] },
+      $or: [
+        {
+          sender: senderId,
+          receiver: receiverId,
+          offeredSkill: offered,
+          wantedSkill: wanted,
+        },
+        {
+          sender: receiverId,
+          receiver: senderId,
+          offeredSkill: wanted,
+          wantedSkill: offered,
+        },
+      ],
     });
 
     if (existingRequest) {
       res.status(409).json({
         success: false,
-        message: "A pending request already exists for this exchange",
+        message:
+          existingRequest.status === "accepted"
+            ? "This exchange has already been accepted"
+            : "A pending request already exists for this exchange",
       });
       return;
     }
@@ -100,6 +115,15 @@ export const sendExchangeRequest = async (
       receiver: receiverId,
       offeredSkill: offered,
       wantedSkill: wanted,
+    });
+
+    await createNotification({
+      recipient: receiverId,
+      actor: senderId!,
+      type: "exchange_request_received",
+      title: "New exchange request",
+      message: `${sender.name} sent you a skill exchange request.`,
+      relatedExchangeRequest: exchangeRequest._id,
     });
 
     res.status(201).json({
@@ -221,6 +245,32 @@ export const respondToExchangeRequest = async (
 
     exchangeRequest.status = status;
     await exchangeRequest.save();
+
+    const receiver = await User.findById(req.userId).select("name");
+
+    const notificationType =
+      status === "accepted"
+        ? "exchange_request_accepted"
+        : "exchange_request_rejected";
+
+    const notificationTitle =
+      status === "accepted"
+        ? "Exchange request accepted"
+        : "Exchange request rejected";
+
+    const notificationMessage =
+      status === "accepted"
+        ? `${receiver?.name ?? "Your exchange partner"} accepted your exchange request.`
+        : `${receiver?.name ?? "Your exchange partner"} rejected your exchange request.`;
+
+    await createNotification({
+      recipient: exchangeRequest.sender.toString(),
+      actor: req.userId!,
+      type: notificationType,
+      title: notificationTitle,
+      message: notificationMessage,
+      relatedExchangeRequest: exchangeRequest._id,
+    });
 
     res.status(200).json({
       success: true,

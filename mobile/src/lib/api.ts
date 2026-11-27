@@ -1,11 +1,14 @@
 
-const API_BASE_URL = process.env.EXPO_PUBLIC_API_URL;
+export const API_BASE_URL = process.env.EXPO_PUBLIC_API_URL;
 
 if (!API_BASE_URL) {
   throw new Error(
     "EXPO_PUBLIC_API_URL is missing. Check your mobile/.env file.",
   );
 }
+
+// Socket.IO is mounted on the server root, not under /api.
+export const SOCKET_BASE_URL = API_BASE_URL.replace(/\/api\/?$/, "");
 
 export type ApiUser = {
   _id: string;
@@ -65,6 +68,50 @@ export type CreateRequestResponse = {
   success: boolean;
   message: string;
   request: ExchangeRequest;
+};
+
+export type ChatParticipant = {
+  _id: string;
+  name: string;
+};
+
+export type ChatExchange = {
+  _id: string;
+  sender: ChatParticipant | string;
+  receiver: ChatParticipant | string;
+  offeredSkill: string;
+  wantedSkill: string;
+  status: "pending" | "accepted" | "rejected";
+};
+
+export type ChatItem = {
+  _id: string;
+  participants: (ChatParticipant | string)[];
+  exchangeRequest: ChatExchange | string;
+  lastMessage: string;
+  lastMessageAt?: string;
+  updatedAt?: string;
+};
+
+export type ChatsResponse = {
+  success: boolean;
+  count: number;
+  chats: ChatItem[];
+};
+
+export type ChatMessage = {
+  _id: string;
+  chat: string;
+  sender: ChatParticipant | string;
+  text: string;
+  createdAt: string;
+  updatedAt?: string;
+};
+
+export type ChatMessagesResponse = {
+  success: boolean;
+  count: number;
+  messages: ChatMessage[];
 };
 
 export async function apiRequest<T>(
