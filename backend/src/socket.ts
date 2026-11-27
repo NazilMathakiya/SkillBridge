@@ -261,6 +261,162 @@ export const initializeSocket = (io: Server): void => {
         }
       }
     );
+    // Edit a message. Only its original sender can edit it within 5 minutes.
+socket.on(
+  "message:edit",
+  async (data: { chatId?: string; messageId?: string; text?: string }) => {
+    try {
+      const chatId = data?.chatId;
+      const messageId = data?.messageId;
+      const text = data?.text?.trim();
+
+      // Validate input.
+      if (
+        typeof chatId !== "string" ||
+        typeof messageId !== "string" ||
+        !mongoose.isValidObjectId(chatId) ||
+        !mongoose.isValidObjectId(messageId) ||
+        typeof text !== "string" ||
+        !text
+      ) {
+        socket.emit("chat:error", {
+          message:
+            "Valid chat ID, message ID, and message text are required",
+        });
+        return;
+      }
+
+      // Check maximum message length.
+      if (text.length > 2000) {
+        socket.emit("chat:error", {
+          message: "Message cannot exceed 2000 characters",
+        });
+        return;
+      }
+
+      // Ensure the user has joined this chat.
+      if (!socket.rooms.has(chatId)) {
+        socket.emit("chat:error", {
+          message: "Join the chat before editing a message",
+        });
+        return;
+      }
+
+      // Find chat.
+      const chat = await Chat.findById(chatId);
+
+      if (!chat) {
+        socket.emit("chat:error", {
+          message: "Chat not found",
+        });
+        return;
+      }
+
+      // Check whether the user is a participant.
+      const isParticipant = chat.participants.some(
+        (participant) => participant.toString() === userId
+      );
+
+      if (!isParticipant) {
+        socket.emit("chat:error", {
+          message: "You are not a participant in this chat",
+        });
+        return;
+      }
+
+      // Ensure the exchange is accepted.
+      const acceptedExchange = await ExchangeRequest.findOne({
+        _id: chat.exchangeRequest,
+        status: "accepted",
+      });
+
+      if (!acceptedExchange) {
+        socket.emit("chat:error", {
+          message: "This exchange is not active",
+        });
+        return;
+      }
+
+      // Find the requested message.
+      const message = await Message.findOne({
+        _id: messageId,
+        chat: chatId,
+      });
+
+      if (!message) {
+        socket.emit("chat:error", {
+          message: "Message not found",
+        });
+        return;
+      }
+
+      // Only the original sender can edit the message.
+      if (message.sender.toString() !== userId) {
+        socket.emit("chat:error", {
+          message: "You can only edit your own messages",
+        });
+        return;
+      }
+
+      // Enforce the five-minute edit limit on the server.
+      const messageAge = Date.now() - message.createdAt.getTime();
+
+      if (messageAge < 0 || messageAge > 5 * 60 * 1000) {
+        socket.emit("chat:error", {
+          message: "The 5-minute edit window has expired",
+        });
+        return;
+      }
+
+      // Update message in MongoDB.
+      message.text = text;
+      message.editedAt = new Date();
+
+      await message.save();
+
+      // Update chat preview if this is the latest message.
+      const latestMessage = await Message.findOne({
+        chat: chatId,
+      })
+        .sort({ createdAt: -1 })
+        .select("_id text createdAt");
+
+      if (
+        latestMessage &&
+        latestMessage._id.toString() === messageId
+      ) {
+        chat.lastMessage = latestMessage.text;
+        chat.lastMessageAt = latestMessage.createdAt;
+
+        await chat.save();
+      }
+
+      // Prepare updated message.
+      const messagePayload = {
+        _id: message._id.toString(),
+        chat: chatId,
+        sender: message.sender.toString(),
+        text: message.text,
+        createdAt: message.createdAt,
+        updatedAt: message.updatedAt,
+        editedAt: message.editedAt,
+      };
+
+      // Notify both participants.
+      io.to(chatId).emit("message:edited", {
+        chatId,
+        message: messagePayload,
+      });
+
+    } catch (error) {
+      console.error("Edit message error:", error);
+
+      socket.emit("chat:error", {
+        message: "Failed to edit message",
+      });
+    }
+  }
+);
 
     // Delete a message. Only its original sender can delete it.
     socket.on(

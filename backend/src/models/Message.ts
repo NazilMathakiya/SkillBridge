@@ -1,4 +1,3 @@
-
 import mongoose, { Schema, Document } from "mongoose";
 
 export interface IMessage extends Document {
@@ -7,6 +6,7 @@ export interface IMessage extends Document {
   text: string;
   createdAt: Date;
   updatedAt: Date;
+  editedAt?: Date;
 }
 
 const messageSchema = new Schema<IMessage>(
@@ -27,6 +27,10 @@ const messageSchema = new Schema<IMessage>(
       required: true,
       trim: true,
       maxlength: 2000,
+    },
+    editedAt: {
+      type: Date,
+      default: null,
     },
   },
   {
