@@ -1,6 +1,7 @@
 
 import { Server, Socket } from "socket.io";
 import jwt from "jsonwebtoken";
+import mongoose from "mongoose";
 
 import Chat from "./models/Chat.js";
 import ExchangeRequest from "./models/ExchangeRequest.js";
@@ -61,9 +62,12 @@ export const initializeSocket = (io: Server): void => {
       try {
         const chatId = data?.chatId;
 
-        if (typeof chatId !== "string") {
+        if (
+          typeof chatId !== "string" ||
+          !mongoose.isValidObjectId(chatId)
+        ) {
           socket.emit("chat:error", {
-            message: "Chat ID is required",
+            message: "Valid chat ID is required",
           });
           return;
         }
@@ -124,11 +128,12 @@ export const initializeSocket = (io: Server): void => {
 
           if (
             typeof chatId !== "string" ||
+            !mongoose.isValidObjectId(chatId) ||
             typeof text !== "string" ||
             !text
           ) {
             socket.emit("chat:error", {
-              message: "Chat ID and message text are required",
+              message: "Valid chat ID and message text are required",
             });
             return;
           }
@@ -252,6 +257,118 @@ export const initializeSocket = (io: Server): void => {
 
           socket.emit("chat:error", {
             message: "Failed to send message",
+          });
+        }
+      }
+    );
+
+    // Delete a message. Only its original sender can delete it.
+    socket.on(
+      "message:delete",
+      async (data: { chatId?: string; messageId?: string }) => {
+        try {
+          const chatId = data?.chatId;
+          const messageId = data?.messageId;
+
+          if (
+            typeof chatId !== "string" ||
+            typeof messageId !== "string" ||
+            !mongoose.isValidObjectId(chatId) ||
+            !mongoose.isValidObjectId(messageId)
+          ) {
+            socket.emit("chat:error", {
+              message: "Valid chat and message IDs are required",
+            });
+            return;
+          }
+
+          // Require the socket to have joined this chat room.
+          if (!socket.rooms.has(chatId)) {
+            socket.emit("chat:error", {
+              message: "Join the chat before deleting a message",
+            });
+            return;
+          }
+
+          const chat = await Chat.findById(chatId);
+
+          if (!chat) {
+            socket.emit("chat:error", {
+              message: "Chat not found",
+            });
+            return;
+          }
+
+          const isParticipant = chat.participants.some(
+            (participant) => participant.toString() === userId
+          );
+
+          if (!isParticipant) {
+            socket.emit("chat:error", {
+              message: "You are not a participant in this chat",
+            });
+            return;
+          }
+
+          const acceptedExchange = await ExchangeRequest.findOne({
+            _id: chat.exchangeRequest,
+            status: "accepted",
+          });
+
+          if (!acceptedExchange) {
+            socket.emit("chat:error", {
+              message: "This exchange is not active",
+            });
+            return;
+          }
+
+          const message = await Message.findOne({
+            _id: messageId,
+            chat: chatId,
+          });
+
+          if (!message) {
+            socket.emit("chat:error", {
+              message: "Message not found",
+            });
+            return;
+          }
+
+          // Users can delete only messages they sent.
+          if (message.sender.toString() !== userId) {
+            socket.emit("chat:error", {
+              message: "You can only delete your own messages",
+            });
+            return;
+          }
+
+          await Message.deleteOne({
+            _id: messageId,
+            chat: chatId,
+            sender: userId,
+          });
+
+          // Refresh the chat preview after deletion.
+          const latestMessage = await Message.findOne({
+            chat: chatId,
+          })
+            .sort({ createdAt: -1 })
+            .select("text createdAt");
+
+          chat.lastMessage = latestMessage?.text ?? "";
+          chat.lastMessageAt = latestMessage?.createdAt;
+          await chat.save();
+
+          // Remove the message from both participants' chat screens.
+          io.to(chatId).emit("message:deleted", {
+            chatId,
+            messageId,
+          });
+        } catch (error) {
+          console.error("Delete message error:", error);
+
+          socket.emit("chat:error", {
+            message: "Failed to delete message",
           });
         }
       }

@@ -24,20 +24,26 @@ import {
   SOCKET_BASE_URL,
 } from "@/lib/api";
 
-const getSenderId = (sender: ChatParticipant | string) => {
-  return typeof sender === "string" ? sender : sender._id;
+const getSenderId = (sender: ChatParticipant | string): string => {
+  if (typeof sender === "string") {
+    return sender;
+  }
+
+  return String(sender._id ?? "");
 };
 
-const getSenderName = (sender: ChatParticipant | string) => {
-  return typeof sender === "string" ? "SkillBridge user" : sender.name;
+const getSenderName = (sender: ChatParticipant | string): string => {
+  if (typeof sender === "string") {
+    return "SkillBridge user";
+  }
+
+  return sender.name ?? "SkillBridge user";
 };
 
 export default function ChatScreen() {
   const { chatId } = useLocalSearchParams<{ chatId: string }>();
 
   const socketRef = useRef<Socket | null>(null);
-
-  // Correct ref type for the React Native ScrollView instance
   const scrollRef = useRef<React.ComponentRef<typeof ScrollView>>(null);
 
   const [messages, setMessages] = useState<ChatMessage[]>([]);
@@ -70,7 +76,7 @@ export default function ChatScreen() {
         if (cancelled) return;
 
         setMessages(messageResponse.messages ?? []);
-        setCurrentUserId(profileResponse.user._id);
+        setCurrentUserId(String(profileResponse.user._id));
 
         const socket = io(SOCKET_BASE_URL, {
           auth: { token },
@@ -102,6 +108,17 @@ export default function ChatScreen() {
             return [...current, message];
           });
         });
+
+        socket.on(
+          "message:deleted",
+          (data: { chatId: string; messageId: string }) => {
+            if (data.chatId !== chatId) return;
+
+            setMessages((current) =>
+              current.filter((message) => message._id !== data.messageId),
+            );
+          },
+        );
 
         socket.on("chat:error", (data: { message?: string }) => {
           Alert.alert(
@@ -164,10 +181,59 @@ export default function ChatScreen() {
     setMessageText("");
   };
 
+  const confirmDeleteMessage = (message: ChatMessage) => {
+    const senderId = getSenderId(message.sender);
+    const isMine = senderId === currentUserId;
+
+    console.log("Long press message:", {
+      messageId: message._id,
+      senderId,
+      currentUserId,
+      isMine,
+    });
+
+    if (!isMine) {
+      Alert.alert(
+        "Cannot delete message",
+        "You can only delete messages that you sent.",
+      );
+      return;
+    }
+
+    Alert.alert(
+      "Delete message?",
+      "This message will be deleted for both participants.",
+      [
+        {
+          text: "Cancel",
+          style: "cancel",
+        },
+        {
+          text: "Delete",
+          style: "destructive",
+          onPress: () => {
+            if (!socketRef.current?.connected || !joined) {
+              Alert.alert(
+                "Not connected",
+                "Please wait until the chat is connected.",
+              );
+              return;
+            }
+
+            socketRef.current.emit("message:delete", {
+              chatId,
+              messageId: message._id,
+            });
+          },
+        },
+      ],
+    );
+  };
+
   return (
     <KeyboardAvoidingView
       style={styles.container}
-      behavior={Platform.OS === "ios" ? "padding" : undefined}
+      behavior={Platform.OS === "ios" ? "padding" : "height"}
       keyboardVerticalOffset={Platform.OS === "ios" ? 10 : 0}
     >
       <View style={styles.header}>
@@ -197,6 +263,7 @@ export default function ChatScreen() {
             ref={scrollRef}
             style={styles.messagesContainer}
             contentContainerStyle={styles.messagesContent}
+            keyboardShouldPersistTaps="handled"
             onContentSizeChange={() =>
               scrollRef.current?.scrollToEnd({ animated: true })
             }
@@ -221,7 +288,12 @@ export default function ChatScreen() {
                       isMine && styles.myMessageRow,
                     ]}
                   >
-                    <View
+                    <Pressable
+                      delayLongPress={500}
+                      onPress={() => {}}
+                      onLongPress={() => {
+                        confirmDeleteMessage(message);
+                      }}
                       style={[
                         styles.messageBubble,
                         isMine
@@ -255,7 +327,13 @@ export default function ChatScreen() {
                           minute: "2-digit",
                         })}
                       </Text>
-                    </View>
+
+                      {isMine && (
+                        <Text style={styles.deleteHint}>
+                          Hold to delete
+                        </Text>
+                      )}
+                    </Pressable>
                   </View>
                 );
               })
@@ -270,19 +348,22 @@ export default function ChatScreen() {
               placeholderTextColor="#9CA3AF"
               multiline
               maxLength={2000}
+              textAlignVertical="center"
               style={styles.messageInput}
             />
 
-            <Pressable
-              style={[
-                styles.sendButton,
-                (!joined || !messageText.trim()) && styles.disabledSendButton,
-              ]}
-              disabled={!joined || !messageText.trim()}
-              onPress={sendMessage}
-            >
-              <Text style={styles.sendButtonText}>Send</Text>
-            </Pressable>
+            {messageText.trim().length > 0 && (
+              <Pressable
+                style={[
+                  styles.sendButton,
+                  !joined && styles.disabledSendButton,
+                ]}
+                disabled={!joined}
+                onPress={sendMessage}
+              >
+                <Text style={styles.sendButtonText}>➤</Text>
+              </Pressable>
+            )}
           </View>
         </>
       )}
@@ -412,10 +493,18 @@ const styles = StyleSheet.create({
   myMessageTime: {
     color: "#DBEAFE",
   },
+  deleteHint: {
+    marginTop: 3,
+    fontSize: 9,
+    color: "#DBEAFE",
+    textAlign: "right",
+  },
   inputContainer: {
     flexDirection: "row",
     alignItems: "flex-end",
-    padding: 12,
+    paddingHorizontal: 12,
+    paddingTop: 10,
+    paddingBottom: Platform.OS === "android" ? 10 : 12,
     backgroundColor: "#FFFFFF",
     borderTopWidth: 1,
     borderTopColor: "#E5E7EB",
@@ -423,19 +512,19 @@ const styles = StyleSheet.create({
   },
   messageInput: {
     flex: 1,
-    maxHeight: 110,
-    minHeight: 44,
-    paddingHorizontal: 14,
-    paddingVertical: 11,
-    borderRadius: 22,
+    minHeight: 48,
+    maxHeight: 120,
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+    borderRadius: 24,
     backgroundColor: "#F3F4F6",
     color: "#111827",
-    fontSize: 15,
+    fontSize: 16,
   },
   sendButton: {
-    minHeight: 44,
-    paddingHorizontal: 18,
-    borderRadius: 22,
+    width: 48,
+    height: 48,
+    borderRadius: 24,
     alignItems: "center",
     justifyContent: "center",
     backgroundColor: "#2563EB",
@@ -445,6 +534,7 @@ const styles = StyleSheet.create({
   },
   sendButtonText: {
     color: "#FFFFFF",
+    fontSize: 22,
     fontWeight: "700",
   },
 });
