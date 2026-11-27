@@ -24,20 +24,83 @@ import {
   SOCKET_BASE_URL,
 } from "@/lib/api";
 
-const getSenderId = (sender: ChatParticipant | string): string => {
-  if (typeof sender === "string") {
-    return sender;
+type SenderLike =
+  | ChatParticipant
+  | string
+  | Record<string, unknown>
+  | null
+  | undefined;
+
+const normalizeId = (value: unknown): string => {
+  if (typeof value === "string" || typeof value === "number") {
+    return String(value).trim();
   }
 
-  return String(sender._id ?? "");
+  if (value && typeof value === "object") {
+    const record = value as Record<string, unknown>;
+
+    // Handle MongoDB ObjectId.
+    if (typeof record.toString === "function") {
+      const objectIdString = String(record);
+
+      if (
+        objectIdString &&
+        objectIdString !== "[object Object]"
+      ) {
+        return objectIdString.trim();
+      }
+    }
+
+    return normalizeId(
+      record._id ??
+        record.id ??
+        record.userId ??
+        record.senderId,
+    );
+  }
+
+  return "";
 };
 
-const getSenderName = (sender: ChatParticipant | string): string => {
-  if (typeof sender === "string") {
+const getSenderId = (sender: SenderLike): string => {
+  if (!sender) return "";
+
+  if (typeof sender === "string" || typeof sender === "number") {
+    return normalizeId(sender);
+  }
+
+  const record = sender as Record<string, unknown>;
+
+  return normalizeId(
+    record._id ??
+      record.id ??
+      record.userId ??
+      record.senderId ??
+      record.user ??
+      record.sender,
+  );
+};
+
+const getMessageSenderId = (message: ChatMessage): string => {
+  const record = message as unknown as Record<string, unknown>;
+
+  return (
+    getSenderId(record.sender as SenderLike) ||
+    getSenderId(record.senderId as SenderLike) ||
+    getSenderId(record.userId as SenderLike)
+  );
+};
+
+const getSenderName = (sender: SenderLike): string => {
+  if (!sender || typeof sender === "string") {
     return "SkillBridge user";
   }
 
-  return sender.name ?? "SkillBridge user";
+  const record = sender as Record<string, unknown>;
+
+  return typeof record.name === "string"
+    ? record.name
+    : "SkillBridge user";
 };
 
 export default function ChatScreen() {
@@ -49,6 +112,7 @@ export default function ChatScreen() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [currentUserId, setCurrentUserId] = useState("");
   const [messageText, setMessageText] = useState("");
+  const [editingMessage, setEditingMessage] = useState<ChatMessage | null>(null);
   const [loading, setLoading] = useState(true);
   const [joined, setJoined] = useState(false);
 
@@ -59,7 +123,9 @@ export default function ChatScreen() {
       try {
         setLoading(true);
 
-        const token = await SecureStore.getItemAsync("skillbridge_token");
+        const token = await SecureStore.getItemAsync(
+          "skillbridge_token",
+        );
 
         if (!token) {
           router.replace("/" as any);
@@ -67,16 +133,30 @@ export default function ChatScreen() {
         }
 
         const [messageResponse, profileResponse] = await Promise.all([
-          apiRequest<ChatMessagesResponse>(`/chats/${chatId}/messages`, {
-            token,
-          }),
-          apiRequest<{ user: { _id: string } }>("/profile/me", { token }),
+          apiRequest<ChatMessagesResponse>(
+            `/chats/${chatId}/messages`,
+            { token },
+          ),
+          apiRequest<{ user: { _id: string } }>(
+            "/profile/me",
+            { token },
+          ),
         ]);
 
         if (cancelled) return;
 
         setMessages(messageResponse.messages ?? []);
-        setCurrentUserId(String(profileResponse.user._id));
+
+        const profileUser =
+          profileResponse.user as unknown as Record<string, unknown>;
+
+        const profileId = normalizeId(
+          profileUser._id ??
+            profileUser.id ??
+            profileUser.userId,
+        );
+
+        setCurrentUserId(profileId);
 
         const socket = io(SOCKET_BASE_URL, {
           auth: { token },
@@ -89,51 +169,87 @@ export default function ChatScreen() {
           socket.emit("chat:join", { chatId });
         });
 
-        socket.on("chat:joined", (data: { chatId: string }) => {
-          if (data.chatId === chatId) {
-            setJoined(true);
-          }
-        });
-
-        socket.on("message:new", (message: ChatMessage) => {
-          if (message.chat !== chatId) return;
-
-          setMessages((current) => {
-            const alreadyExists = current.some(
-              (item) => item._id === message._id,
-            );
-
-            if (alreadyExists) return current;
-
-            return [...current, message];
-          });
-        });
+        socket.on(
+          "chat:joined",
+          (data: { chatId: string }) => {
+            if (data.chatId === chatId) {
+              setJoined(true);
+            }
+          },
+        );
 
         socket.on(
-          "message:deleted",
-          (data: { chatId: string; messageId: string }) => {
-            if (data.chatId !== chatId) return;
+          "message:new",
+          (message: ChatMessage) => {
+            if (message.chat !== chatId) return;
+
+            setMessages((current) => {
+              const alreadyExists = current.some(
+                (item) => item._id === message._id,
+              );
+
+              if (alreadyExists) return current;
+
+              return [...current, message];
+            });
+          },
+        );
+
+        socket.on(
+          "message:edited",
+          (data: { chatId: string; message: ChatMessage }) => {
+            if (data.chatId !== chatId || !data.message?._id) return;
 
             setMessages((current) =>
-              current.filter((message) => message._id !== data.messageId),
+              current.map((item) =>
+                item._id === data.message._id ? data.message : item,
+              ),
+            );
+
+            setEditingMessage((current) =>
+              current?._id === data.message._id ? null : current,
             );
           },
         );
 
-        socket.on("chat:error", (data: { message?: string }) => {
-          Alert.alert(
-            "Chat error",
-            data?.message ?? "Something went wrong.",
-          );
-        });
+        socket.on(
+          "message:deleted",
+          (data: {
+            chatId: string;
+            messageId: string;
+          }) => {
+            if (data.chatId !== chatId) return;
+
+            setMessages((current) =>
+              current.filter(
+                (message) => message._id !== data.messageId,
+              ),
+            );
+          },
+        );
+
+        socket.on(
+          "chat:error",
+          (data: { message?: string }) => {
+            Alert.alert(
+              "Chat error",
+              data?.message ?? "Something went wrong.",
+            );
+          },
+        );
 
         socket.on("connect_error", (error) => {
-          Alert.alert("Connection failed", error.message);
+          Alert.alert(
+            "Connection failed",
+            error.message,
+          );
         });
       } catch (error) {
         Alert.alert(
           "Could not open chat",
-          error instanceof Error ? error.message : "Please try again.",
+          error instanceof Error
+            ? error.message
+            : "Please try again.",
         );
       } finally {
         if (!cancelled) {
@@ -173,6 +289,41 @@ export default function ChatScreen() {
       return;
     }
 
+    if (editingMessage) {
+      const createdAt = new Date(editingMessage.createdAt).getTime();
+      const withinEditWindow =
+        Number.isFinite(createdAt) &&
+        Date.now() - createdAt >= 0 &&
+        Date.now() - createdAt <= 5 * 60 * 1000;
+
+      if (!withinEditWindow) {
+        Alert.alert(
+          "Edit time expired",
+          "Messages can only be edited within 5 minutes of sending.",
+        );
+        setEditingMessage(null);
+        setMessageText("");
+        return;
+      }
+
+      if (text === editingMessage.text.trim()) {
+        setEditingMessage(null);
+        setMessageText("");
+        return;
+      }
+
+      socketRef.current.emit("message:edit", {
+        chatId,
+        messageId: editingMessage._id,
+        text,
+      });
+
+      // Wait for the server's message:edited event to update the message.
+      setMessageText("");
+      setEditingMessage(null);
+      return;
+    }
+
     socketRef.current.emit("message:send", {
       chatId,
       text,
@@ -181,52 +332,88 @@ export default function ChatScreen() {
     setMessageText("");
   };
 
-  const confirmDeleteMessage = (message: ChatMessage) => {
-    const senderId = getSenderId(message.sender);
-    const isMine = senderId === currentUserId;
+  const cancelEditing = () => {
+    setEditingMessage(null);
+    setMessageText("");
+  };
 
-    console.log("Long press message:", {
-      messageId: message._id,
-      senderId,
-      currentUserId,
-      isMine,
-    });
+  const confirmDeleteMessage = (message: ChatMessage) => {
+    const senderId = getMessageSenderId(message);
+    const isMine =
+      Boolean(senderId) &&
+      Boolean(currentUserId) &&
+      senderId === normalizeId(currentUserId);
 
     if (!isMine) {
       Alert.alert(
-        "Cannot delete message",
-        "You can only delete messages that you sent.",
+        "Cannot manage message",
+        "You can only edit or delete messages that you sent.",
       );
       return;
     }
 
-    Alert.alert(
-      "Delete message?",
-      "This message will be deleted for both participants.",
-      [
-        {
-          text: "Cancel",
-          style: "cancel",
-        },
-        {
-          text: "Delete",
-          style: "destructive",
-          onPress: () => {
-            if (!socketRef.current?.connected || !joined) {
-              Alert.alert(
-                "Not connected",
-                "Please wait until the chat is connected.",
-              );
-              return;
-            }
+    const createdAt = new Date(message.createdAt).getTime();
+    const withinEditWindow =
+      Number.isFinite(createdAt) &&
+      Date.now() - createdAt >= 0 &&
+      Date.now() - createdAt <= 5 * 60 * 1000;
 
-            socketRef.current.emit("message:delete", {
-              chatId,
-              messageId: message._id,
-            });
-          },
+    const options: {
+      text: string;
+      style?: "cancel" | "destructive" | "default";
+      onPress?: () => void;
+    }[] = [];
+
+    if (withinEditWindow) {
+      options.push({
+        text: "Edit message",
+        onPress: () => {
+          setEditingMessage(message);
+          setMessageText(message.text);
         },
-      ],
+      });
+    }
+
+    options.push({
+      text: "Delete message",
+      style: "destructive",
+      onPress: () => {
+        Alert.alert(
+          "Delete message?",
+          "This message will be deleted for both participants.",
+          [
+            { text: "Cancel", style: "cancel" },
+            {
+              text: "Delete",
+              style: "destructive",
+              onPress: () => {
+                if (!socketRef.current?.connected || !joined) {
+                  Alert.alert(
+                    "Not connected",
+                    "Please wait until the chat is connected.",
+                  );
+                  return;
+                }
+
+                socketRef.current.emit("message:delete", {
+                  chatId,
+                  messageId: message._id,
+                });
+              },
+            },
+          ],
+        );
+      },
+    });
+
+    options.push({ text: "Cancel", style: "cancel" });
+
+    Alert.alert(
+      "Message options",
+      withinEditWindow
+        ? "You can edit this message within 5 minutes of sending."
+        : "The 5-minute edit window has expired.",
+      options,
     );
   };
 
@@ -245,7 +432,10 @@ export default function ChatScreen() {
         </Pressable>
 
         <View style={styles.headerInfo}>
-          <Text style={styles.headerTitle}>SkillBridge Chat</Text>
+          <Text style={styles.headerTitle}>
+            SkillBridge Chat
+          </Text>
+
           <Text style={styles.connectionText}>
             {joined ? "Connected" : "Connecting..."}
           </Text>
@@ -254,8 +444,14 @@ export default function ChatScreen() {
 
       {loading ? (
         <View style={styles.center}>
-          <ActivityIndicator size="large" color="#2563EB" />
-          <Text style={styles.loadingText}>Loading messages...</Text>
+          <ActivityIndicator
+            size="large"
+            color="#2563EB"
+          />
+
+          <Text style={styles.loadingText}>
+            Loading messages...
+          </Text>
         </View>
       ) : (
         <>
@@ -265,20 +461,30 @@ export default function ChatScreen() {
             contentContainerStyle={styles.messagesContent}
             keyboardShouldPersistTaps="handled"
             onContentSizeChange={() =>
-              scrollRef.current?.scrollToEnd({ animated: true })
+              scrollRef.current?.scrollToEnd({
+                animated: true,
+              })
             }
           >
             {messages.length === 0 ? (
               <View style={styles.emptyMessages}>
-                <Text style={styles.emptyTitle}>Start the conversation</Text>
+                <Text style={styles.emptyTitle}>
+                  Start the conversation
+                </Text>
+
                 <Text style={styles.emptyText}>
                   Say hello to your skill exchange partner!
                 </Text>
               </View>
             ) : (
               messages.map((message) => {
+                const messageSenderId =
+                  getMessageSenderId(message);
+
                 const isMine =
-                  getSenderId(message.sender) === currentUserId;
+                  Boolean(messageSenderId) &&
+                  messageSenderId ===
+                    normalizeId(currentUserId);
 
                 return (
                   <View
@@ -322,15 +528,28 @@ export default function ChatScreen() {
                           isMine && styles.myMessageTime,
                         ]}
                       >
-                        {new Date(message.createdAt).toLocaleTimeString([], {
+                        {new Date(
+                          message.createdAt,
+                        ).toLocaleTimeString([], {
                           hour: "2-digit",
                           minute: "2-digit",
                         })}
                       </Text>
 
+                      {(message as ChatMessage & { editedAt?: string }).editedAt && (
+                        <Text
+                          style={[
+                            styles.messageTime,
+                            isMine && styles.myMessageTime,
+                          ]}
+                        >
+                          Edited
+                        </Text>
+                      )}
+
                       {isMine && (
                         <Text style={styles.deleteHint}>
-                          Hold to delete
+                          Hold to edit or delete
                         </Text>
                       )}
                     </Pressable>
@@ -344,13 +563,22 @@ export default function ChatScreen() {
             <TextInput
               value={messageText}
               onChangeText={setMessageText}
-              placeholder="Write a message..."
+              placeholder={editingMessage ? "Edit your message..." : "Write a message..."}
               placeholderTextColor="#9CA3AF"
               multiline
               maxLength={2000}
               textAlignVertical="center"
               style={styles.messageInput}
             />
+
+            {editingMessage && (
+              <Pressable
+                style={styles.cancelEditButton}
+                onPress={cancelEditing}
+              >
+                <Text style={styles.cancelEditText}>Cancel</Text>
+              </Pressable>
+            )}
 
             {messageText.trim().length > 0 && (
               <Pressable
@@ -361,7 +589,9 @@ export default function ChatScreen() {
                 disabled={!joined}
                 onPress={sendMessage}
               >
-                <Text style={styles.sendButtonText}>➤</Text>
+                <Text style={styles.sendButtonText}>
+                  {editingMessage ? "Save" : "➤"}
+                </Text>
               </Pressable>
             )}
           </View>
@@ -499,12 +729,23 @@ const styles = StyleSheet.create({
     color: "#DBEAFE",
     textAlign: "right",
   },
+  cancelEditButton: {
+    minHeight: 48,
+    justifyContent: "center",
+    paddingHorizontal: 8,
+  },
+  cancelEditText: {
+    color: "#2563EB",
+    fontSize: 12,
+    fontWeight: "700",
+  },
   inputContainer: {
     flexDirection: "row",
     alignItems: "flex-end",
     paddingHorizontal: 12,
     paddingTop: 10,
-    paddingBottom: Platform.OS === "android" ? 10 : 12,
+    paddingBottom:
+      Platform.OS === "android" ? 10 : 12,
     backgroundColor: "#FFFFFF",
     borderTopWidth: 1,
     borderTopColor: "#E5E7EB",

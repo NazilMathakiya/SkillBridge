@@ -56,15 +56,21 @@ app.use("/api/chats", chatRoutes);
 app.use("/api/notifications", notificationRoutes);
 app.use("/api/push-tokens", pushTokenRoutes);
 
-const PORT = process.env.PORT || 5000;
+const PORT = Number(process.env.PORT) || 5000;
 
 const startServer = async (): Promise<void> => {
-  await connectDB();
+  try {
+    await connectDB();
 
-  httpServer.listen(PORT, () => {
-    console.log(`SkillBridge API running on port ${PORT}`);
-    console.log("Socket.IO chat server is ready");
-  });
+    httpServer.listen(PORT, "0.0.0.0", () => {
+      console.log(`SkillBridge API running on port ${PORT}`);
+      console.log("Listening on all network interfaces (0.0.0.0)");
+      console.log("Socket.IO chat server is ready");
+    });
+  } catch (error) {
+    console.error("Failed to start SkillBridge backend:", error);
+    process.exit(1);
+  }
 };
 
 startServer();
