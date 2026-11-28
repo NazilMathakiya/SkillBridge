@@ -1,4 +1,3 @@
-
 {
   "expo": {
     "name": "SkillBridge",
@@ -26,18 +25,18 @@
     },
     "plugins": [
       "expo-router",
-    
-[
-  "expo-splash-screen",
-  {
-    "backgroundColor": "#FFFFFF",
-    "image": "./assets/images/logo.png",
-    "imageWidth": 220
-  }
-],
+      [
+        "expo-splash-screen",
+        {
+          "backgroundColor": "#FFFFFF",
+          "image": "./assets/images/logo.png",
+          "imageWidth": 220
+        }
+      ],
       "expo-secure-store",
       "@react-native-community/datetimepicker",
-      "expo-notifications"
+      "expo-notifications",
+      "expo-image"
     ],
     "experiments": {
       "typedRoutes": true,

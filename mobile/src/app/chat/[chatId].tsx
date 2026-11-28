@@ -1,4 +1,3 @@
-
 import React, { useEffect, useRef, useState } from "react";
 import {
   ActivityIndicator,
@@ -337,7 +336,10 @@ export default function ChatScreen() {
     setMessageText("");
   };
 
-  const confirmDeleteMessage = (message: ChatMessage) => {
+  const confirmDeleteMessage = (
+    message: ChatMessage,
+    currentTime: number,
+  ) => {
     const senderId = getMessageSenderId(message);
     const isMine =
       Boolean(senderId) &&
@@ -355,8 +357,8 @@ export default function ChatScreen() {
     const createdAt = new Date(message.createdAt).getTime();
     const withinEditWindow =
       Number.isFinite(createdAt) &&
-      Date.now() - createdAt >= 0 &&
-      Date.now() - createdAt <= 5 * 60 * 1000;
+      currentTime - createdAt >= 0 &&
+      currentTime - createdAt <= 5 * 60 * 1000;
 
     const options: {
       text: string;
@@ -498,7 +500,7 @@ export default function ChatScreen() {
                       delayLongPress={500}
                       onPress={() => {}}
                       onLongPress={() => {
-                        confirmDeleteMessage(message);
+                        confirmDeleteMessage(message, Date.now());
                       }}
                       style={[
                         styles.messageBubble,

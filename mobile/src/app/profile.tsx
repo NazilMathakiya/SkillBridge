@@ -1,5 +1,4 @@
-
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import SkillBridgeNav from "../components/SkillBridgeNav";
 import {
   ActivityIndicator,
@@ -49,14 +48,8 @@ export default function ProfileScreen() {
   const [error, setError] = useState("");
   const [successMessage, setSuccessMessage] = useState("");
 
-  useEffect(() => {
-    loadProfile();
-  }, []);
-
-  async function loadProfile() {
-    setLoading(true);
-    setError("");
-
+  // Define the callback before the effect that uses it.
+  const loadProfile = useCallback(async (): Promise<void> => {
     try {
       const token = await SecureStore.getItemAsync(TOKEN_KEY);
 
@@ -80,7 +73,11 @@ export default function ProfileScreen() {
     } finally {
       setLoading(false);
     }
-  }
+  }, []);
+
+  useEffect(() => {
+    void loadProfile();
+  }, [loadProfile]);
 
   function addSkill(
     value: string,
