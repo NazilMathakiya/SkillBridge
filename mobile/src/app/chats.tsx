@@ -19,7 +19,6 @@ import {
   ChatItem,
   ChatsResponse,
   ChatParticipant,
-  ChatExchange,
 } from "@/lib/api";
 
 const getId = (value?: ChatParticipant | string) => {

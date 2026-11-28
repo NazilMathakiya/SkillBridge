@@ -48,7 +48,6 @@ export default function ProfileScreen() {
   const [error, setError] = useState("");
   const [successMessage, setSuccessMessage] = useState("");
 
-  // Define the callback before the effect that uses it.
   const loadProfile = useCallback(async (): Promise<void> => {
     try {
       const token = await SecureStore.getItemAsync(TOKEN_KEY);
@@ -76,6 +75,9 @@ export default function ProfileScreen() {
   }, []);
 
   useEffect(() => {
+    // This effect starts asynchronous profile loading.
+    // State updates happen after the SecureStore/API operations complete.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     void loadProfile();
   }, [loadProfile]);
 
